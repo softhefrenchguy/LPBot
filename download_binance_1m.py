@@ -107,28 +107,58 @@ def klines_to_dataframe(rows: list) -> pd.DataFrame:
     return df
 
 
-def validate_and_report(symbol: str, df: pd.DataFrame, start_ms: int, end_ms: int) -> None:
-    if df.empty:
-        raise RuntimeError(f"No data downloaded for {symbol}.")
-
-    first_ts = int(df["timestamp"].iloc[0])
-    last_ts = int(df["timestamp"].iloc[-1])
-    total_rows = len(df)
-
+def compute_missing_minutes(df: pd.DataFrame) -> int:
     diffs = df["timestamp"].diff().dropna()
     gaps = diffs[diffs > 60_000]
-    missing_minutes = int(((gaps // 60_000) - 1).sum()) if not gaps.empty else 0
+    return int(((gaps // 60_000) - 1).sum()) if not gaps.empty else 0
+
+
+def fill_missing_minutes(df: pd.DataFrame, start_ms: int, end_ms: int) -> tuple[pd.DataFrame, int]:
+    full_index = pd.RangeIndex(start_ms, end_ms + 1, 60_000)
+    reindexed = df.set_index("timestamp").reindex(full_index)
+    is_gap = reindexed["open"].isna()
+
+    close_filled = reindexed["close"].ffill().bfill()
+    for col in ["open", "high", "low", "close"]:
+        reindexed[col] = reindexed[col].fillna(close_filled)
+    reindexed["volume"] = reindexed["volume"].fillna(0)
+    reindexed["is_gap"] = is_gap.astype("int64")
+
+    filled = reindexed.reset_index().rename(columns={"index": "timestamp"})
+    filled["timestamp"] = filled["timestamp"].astype("int64")
+    for col in ["open", "high", "low", "close", "volume"]:
+        filled[col] = pd.to_numeric(filled[col], errors="coerce")
+
+    return filled, int(is_gap.sum())
+
+
+def validate_and_report(
+    symbol: str,
+    df_raw: pd.DataFrame,
+    df_filled: pd.DataFrame,
+    start_ms: int,
+    end_ms: int,
+    raw_missing: int,
+    gap_filled: int,
+) -> None:
+    if df_raw.empty:
+        raise RuntimeError(f"No data downloaded for {symbol}.")
+
+    first_ts = int(df_filled["timestamp"].iloc[0])
+    last_ts = int(df_filled["timestamp"].iloc[-1])
+    total_rows = len(df_filled)
 
     expected_total = int((end_ms - start_ms) // 60_000) + 1
     years_approx = (end_ms - start_ms) / (365 * 24 * 60 * 60 * 1000)
     expected_per_year = 365 * 24 * 60
 
     print(f"\nSymbol: {symbol}")
-    print(f"Total rows: {total_rows}")
+    print(f"Total rows (filled): {total_rows}")
     print(f"First timestamp: {first_ts} ({ms_to_utc_str(first_ts)})")
     print(f"Last timestamp: {last_ts} ({ms_to_utc_str(last_ts)})")
     print(f"Expected minutes (approx): {expected_total} (~{expected_per_year} per year x {years_approx:.2f} years)")
-    print(f"Missing minute count (gaps > 1m): {missing_minutes}")
+    print(f"Missing minute count (raw gaps > 1m): {raw_missing}")
+    print(f"Gap-filled rows: {gap_filled}")
 
 
 def main() -> None:
@@ -146,11 +176,13 @@ def main() -> None:
         rows = fetch_klines(symbol, start_ms, end_ms)
         print(f"Downloaded rows (raw): {len(rows)}")
 
-        df = klines_to_dataframe(rows)
-        validate_and_report(symbol, df, start_ms, end_ms)
+        df_raw = klines_to_dataframe(rows)
+        raw_missing = compute_missing_minutes(df_raw)
+        df_filled, gap_filled = fill_missing_minutes(df_raw, start_ms, end_ms)
+        validate_and_report(symbol, df_raw, df_filled, start_ms, end_ms, raw_missing, gap_filled)
 
         out_path = data_dir / f"{symbol}_1m.csv"
-        df.to_csv(out_path, index=False)
+        df_filled.to_csv(out_path, index=False)
         print(f"Saved to {out_path}")
 
 
