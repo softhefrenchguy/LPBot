@@ -1,0 +1,17 @@
+Get data onto PC (1-minute source)
+
+Required files:
+- BTCUSDC_1m.csv
+- ETHUSDC_1m.csv
+
+Option 1: network share (recommended)
+1) Share a folder on laptop that contains the two files.
+2) On PC, run:
+   python scripts/get_data.py --src "\\LAPTOP\market_data" --out "data"
+
+Option 2: local path
+If the files are already on the PC, run:
+   python scripts/get_data.py --src "C:\path\to\folder" --out "data"
+
+After import, you can regenerate timeframes locally:
+   python src/resample/resample_1m.py --data-dir data --tfs 1h 4h 8h --symbols-file config/symbols.txt

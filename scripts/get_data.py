@@ -8,7 +8,7 @@ import zipfile
 from pathlib import Path
 from urllib.request import urlretrieve
 
-REQUIRED = ["ETHUSDC_1h.csv", "BTCUSDC_1h.csv"]
+REQUIRED = ["ETHUSDC_1m.csv", "BTCUSDC_1m.csv"]
 
 
 def copy_mode(src_dir: Path, out_dir: Path) -> None:
