@@ -40,6 +40,13 @@ def _normalize_tf(tf: str) -> str:
     return tf
 
 
+def _default_min_count(tf: str) -> int:
+    tf = tf.strip().lower()
+    if tf == "8h":
+        return 240
+    return 1
+
+
 def _infer_timestamp_series(df: pd.DataFrame) -> pd.Series:
     """
     Return a pandas datetime series in UTC from common timestamp formats.
@@ -129,7 +136,7 @@ def _standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _resample(df: pd.DataFrame, tf: str) -> pd.DataFrame:
+def _resample(df: pd.DataFrame, tf: str, min_count: int) -> pd.DataFrame:
     """
     Resample a 1m OHLCV dataframe (indexed by datetime) to tf.
     """
@@ -142,6 +149,7 @@ def _resample(df: pd.DataFrame, tf: str) -> pd.DataFrame:
         "close": "last",
         "volume": "sum",
     }
+    agg["count_1m_rows"] = "count"
 
     for opt in ["quote_volume", "taker_base_volume", "taker_quote_volume"]:
         if opt in df.columns:
@@ -152,6 +160,7 @@ def _resample(df: pd.DataFrame, tf: str) -> pd.DataFrame:
     out = df.resample(rule, label="right", closed="right").agg(agg)
 
     out = out.dropna(subset=["open", "high", "low", "close"])
+    out = out[out["count_1m_rows"] >= min_count]
 
     out = out.reset_index().rename(columns={"index": "timestamp"})
     out["timestamp"] = out["timestamp"].dt.tz_convert("UTC")
@@ -176,13 +185,17 @@ def _missing_bar_stats(ts: pd.Series, tf: str) -> Tuple[int, int]:
     return expected, missing_gaps
 
 
-def process_symbol_csv(path_in: Path, tfs: List[str]) -> None:
+def process_symbol_csv(path_in: Path, tfs: List[str], min_count: int | None) -> None:
     df = pd.read_csv(path_in)
 
     ts = _infer_timestamp_series(df)
     df["timestamp"] = ts
 
+    if "is_gap" in df.columns:
+        df = df[df["is_gap"].astype(int) == 0]
+
     df = _standardize_columns(df)
+    df["count_1m_rows"] = 1
 
     df = df.sort_values("timestamp")
     df = df.drop_duplicates(subset=["timestamp"], keep="last")
@@ -192,12 +205,22 @@ def process_symbol_csv(path_in: Path, tfs: List[str]) -> None:
     symbol = path_in.name.replace("_1m.csv", "")
 
     for tf in tfs:
-        out = _resample(df, tf)
+        effective_min_count = min_count if min_count is not None else _default_min_count(tf)
+        out = _resample(df, tf, effective_min_count)
 
         exp, gaps = _missing_bar_stats(out["timestamp"], tf)
         rows = len(out)
         first_ts = out["timestamp"].iloc[0] if rows else None
         last_ts = out["timestamp"].iloc[-1] if rows else None
+
+        if rows:
+            counts = out["count_1m_rows"].dropna()
+            p10 = float(counts.quantile(0.10))
+            median = float(counts.median())
+            min_c = float(counts.min())
+            print(
+                f"[{symbol} {tf}] count_1m_rows min/median/p10 = {min_c:.0f}/{median:.0f}/{p10:.0f}"
+            )
 
         path_out = path_in.with_name(f"{symbol}_{tf}.csv")
         out.to_csv(path_out, index=False)
@@ -206,6 +229,25 @@ def process_symbol_csv(path_in: Path, tfs: List[str]) -> None:
             f"[{symbol} {tf}] wrote {path_out.name} | rows={rows:,} | "
             f"first={first_ts} | last={last_ts} | expected~={exp:,} | gap_count={gaps}"
         )
+
+
+def _load_symbols_file(path: Path) -> List[str]:
+    if not path.exists():
+        raise SystemExit(f"Symbols file not found: {path.resolve()}")
+    symbols = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        symbols.append(line)
+    return symbols
+
+
+def _print_symbol_summary(requested: List[str], found: List[str], missing: List[str]) -> None:
+    print(f"Symbols requested: {', '.join(requested) if requested else '(none)'}")
+    print(f"Symbols found: {', '.join(found) if found else '(none)'}")
+    if missing:
+        print(f"Symbols skipped (missing files): {', '.join(missing)}")
 
 
 def main() -> None:
@@ -225,10 +267,21 @@ def main() -> None:
         ),
     )
     p.add_argument(
+        "--symbols-file",
+        default=None,
+        help="Path to a newline-delimited symbols file (e.g. config/symbols.txt).",
+    )
+    p.add_argument(
         "--tfs",
         nargs="*",
         default=DEFAULT_TFS,
         help="Timeframes to write (default: 5m 15m 1h)",
+    )
+    p.add_argument(
+        "--min-count",
+        type=int,
+        default=None,
+        help="Minimum 1m rows per bar (default: 240 for 8h, otherwise 1).",
     )
 
     args = p.parse_args()
@@ -237,8 +290,13 @@ def main() -> None:
     if not data_dir.exists():
         raise SystemExit(f"Data dir not found: {data_dir.resolve()}")
 
-    if args.symbols:
-        paths = [data_dir / f"{s}_1m.csv" for s in args.symbols]
+    if args.symbols_file or args.symbols:
+        requested = args.symbols or _load_symbols_file(Path(args.symbols_file))
+        paths = [data_dir / f"{s}_1m.csv" for s in requested]
+        found = [p for p in paths if p.exists()]
+        missing = [p.name.replace("_1m.csv", "") for p in paths if not p.exists()]
+        _print_symbol_summary(requested, [p.name.replace("_1m.csv", "") for p in found], missing)
+        paths = found
     else:
         paths = sorted(data_dir.glob("*_1m.csv"))
 
@@ -249,7 +307,7 @@ def main() -> None:
         if not path_in.exists():
             print(f"Skipping missing: {path_in}")
             continue
-        process_symbol_csv(path_in, args.tfs)
+        process_symbol_csv(path_in, args.tfs, args.min_count)
 
 
 if __name__ == "__main__":

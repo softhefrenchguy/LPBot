@@ -1,0 +1,21 @@
+# data and artifacts
+data/
+regimes/
+results/
+outputs/
+
+# csvs
+**/*.csv
+
+# python
+__pycache__/
+*.pyc
+.env
+.venv/
+
+# notebooks
+*.ipynb
+
+# logs
+download_log.txt
+download_err.txt

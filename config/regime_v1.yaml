@@ -1,0 +1,31 @@
+version: regime_v1
+
+assets:
+  - BTCUSDC
+  - ETHUSDC
+
+micro:
+  timeframe: 1h
+  profile: micro
+  k_values: [2,3,4]
+  min_expected_duration_hours: 1
+  max_dominant_state_pct: 0.95
+
+macro:
+  timeframe: 8h
+  profile: macro
+  k_values: [2,3,4]
+  min_expected_duration_hours: 20
+  max_dominant_state_pct: 0.95
+  max_duration_gate: disabled
+
+features:
+  - r
+  - abs_r
+  - vol20
+  - vol_z
+
+data_rules:
+  forward_fill: false
+  drop_empty_bins: true
+  enforce_min_count: true
