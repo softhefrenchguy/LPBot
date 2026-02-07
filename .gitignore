@@ -10,6 +10,8 @@ outputs/
 # python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 .env
 .venv/
 
@@ -19,3 +21,12 @@ __pycache__/
 # logs
 download_log.txt
 download_err.txt
+
+# local-only folders
+lpbot/data_sources/
+models/
+
+# os/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
