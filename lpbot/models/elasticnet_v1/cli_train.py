@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from lpbot.models.elasticnet_v1.dataset import build_dataset
+from lpbot.models.elasticnet_v1.dataset import build_supervised_dataset
 from lpbot.models.elasticnet_v1.walk_forward import walk_forward_train
 
 
@@ -28,6 +28,12 @@ def main() -> None:
     p.add_argument("--cv-splits", type=int, default=5)
     p.add_argument("--atr-window", type=int, default=14)
     p.add_argument("--no-time-features", action="store_true")
+    p.add_argument(
+        "--target-type",
+        choices=["return", "vol"],
+        default="return",
+        help="Training target type (default: return).",
+    )
 
     args = p.parse_args()
 
@@ -37,12 +43,13 @@ def main() -> None:
     if args.dataset is not None:
         dataset = pd.read_csv(Path(args.dataset))
     else:
-        dataset = build_dataset(
+        dataset = build_supervised_dataset(
             path_1m=args.input_1m,
             horizon_min=args.horizon_min,
             include_time_features=not args.no_time_features,
             atr_window=args.atr_window,
             regime_path=args.regime_path,
+            target_type=args.target_type,
         )
 
     alphas = _parse_float_list(args.alpha_grid)
@@ -58,6 +65,7 @@ def main() -> None:
         alphas=alphas,
         l1_ratios=l1_ratios,
         cv_splits=args.cv_splits,
+        target_type=args.target_type,
     )
 
     for r in results:

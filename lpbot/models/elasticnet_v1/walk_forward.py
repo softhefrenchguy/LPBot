@@ -27,6 +27,7 @@ class WindowResult:
     mse: float
     mae: float
     corr: float
+    spearman: float
     directional_acc: float
     nonzero: int
 
@@ -52,12 +53,25 @@ def _time_windows(
         cursor = cursor + step
 
 
-def _clip_targets(y_train: np.ndarray, y_val: np.ndarray) -> Tuple[np.ndarray, np.ndarray, float]:
+def _clip_targets(
+    y_train: np.ndarray, y_val: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray, float]:
     std = float(np.std(y_train))
     if std <= 0 or np.isnan(std):
         return y_train, y_val, std
     limit = 3.0 * std
     return np.clip(y_train, -limit, limit), np.clip(y_val, -limit, limit), std
+
+
+def _winsorize_targets(
+    y_train: np.ndarray, y_val: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray, Tuple[float, float]]:
+    if len(y_train) == 0:
+        return y_train, y_val, (float("nan"), float("nan"))
+    p1, p99 = np.percentile(y_train, [1, 99])
+    if np.isnan(p1) or np.isnan(p99):
+        return y_train, y_val, (float(p1), float(p99))
+    return np.clip(y_train, p1, p99), np.clip(y_val, p1, p99), (float(p1), float(p99))
 
 
 def _select_params(
@@ -115,6 +129,14 @@ def _directional_accuracy(y_true: np.ndarray, y_hat: np.ndarray) -> float:
     return float(np.mean(np.sign(y_true) == np.sign(y_hat)))
 
 
+def _spearman_corr(y_true: np.ndarray, y_hat: np.ndarray) -> float:
+    if len(y_true) < 2:
+        return float("nan")
+    s_true = pd.Series(y_true).rank()
+    s_hat = pd.Series(y_hat).rank()
+    return float(s_true.corr(s_hat))
+
+
 def walk_forward_train(
     dataset: pd.DataFrame,
     artifacts_dir: str | Path,
@@ -125,19 +147,29 @@ def walk_forward_train(
     alphas: List[float] | None = None,
     l1_ratios: List[float] | None = None,
     cv_splits: int = 5,
+    target_type: str = "return",
 ) -> Tuple[List[WindowResult], ElasticNet, StandardScaler, List[str]]:
     if alphas is None:
         alphas = [0.1, 0.5, 1.0, 2.0, 5.0, 10.0]
     if l1_ratios is None:
         l1_ratios = [0.5, 0.7, 0.9, 0.95, 0.99]
+    if target_type not in {"return", "vol"}:
+        raise ValueError("target_type must be 'return' or 'vol'.")
 
     df = dataset.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     df = df.sort_values("timestamp")
 
     feature_cols = [c for c in df.columns if c not in ["timestamp", "target"]]
-    X_all = df[feature_cols].values
-    y_all = df["target"].values
+    X_all = df[feature_cols].copy()
+    y_all = df["target"].copy()
+    if not X_all.index.equals(y_all.index):
+        y_all = y_all.reindex(X_all.index)
+        valid_mask = ~y_all.isna()
+        X_all = X_all.loc[valid_mask]
+        y_all = y_all.loc[valid_mask]
+        if not X_all.index.equals(y_all.index):
+            raise ValueError("X and y indices could not be aligned after reindexing.")
 
     windows = list(_time_windows(df["timestamp"], train_days, val_days, step_days))
     if not windows:
@@ -151,23 +183,28 @@ def walk_forward_train(
         train_mask = (df["timestamp"] >= train_start) & (df["timestamp"] < train_end)
         val_mask = (df["timestamp"] >= val_start) & (df["timestamp"] < val_end)
 
-        X_train = X_all[train_mask]
-        y_train = y_all[train_mask]
-        X_val = X_all[val_mask]
-        y_val = y_all[val_mask]
+        X_train = X_all.loc[train_mask]
+        y_train = y_all.loc[train_mask]
+        X_val = X_all.loc[val_mask]
+        y_val = y_all.loc[val_mask]
 
         if len(X_train) == 0 or len(X_val) == 0:
             continue
 
-        y_train_clip, y_val_clip, _ = _clip_targets(y_train, y_val)
+        y_train_arr = y_train.to_numpy()
+        y_val_arr = y_val.to_numpy()
+        if target_type == "return":
+            y_train_clip, y_val_clip, _ = _clip_targets(y_train_arr, y_val_arr)
+        else:
+            y_train_clip, y_val_clip, _ = _winsorize_targets(y_train_arr, y_val_arr)
 
         best_alpha, best_l1_ratio = _select_params(
-            X_train, y_train_clip, alphas, l1_ratios, cv_splits
+            X_train.values, y_train_clip, alphas, l1_ratios, cv_splits
         )
 
         scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_val_scaled = scaler.transform(X_val)
+        X_train_scaled = scaler.fit_transform(X_train.values)
+        X_val_scaled = scaler.transform(X_val.values)
 
         model = ElasticNet(
             alpha=best_alpha,
@@ -180,10 +217,20 @@ def walk_forward_train(
 
         y_hat = model.predict(X_val_scaled)
 
-        mse = float(mean_squared_error(y_val_clip, y_hat))
-        mae = float(mean_absolute_error(y_val_clip, y_hat))
-        corr = _corr(y_val_clip, y_hat)
-        directional_acc = _directional_accuracy(y_val_clip, y_hat)
+        y_hat_series = pd.Series(y_hat, index=X_val.index)
+        y_val_aligned = y_val.reindex(X_val.index)
+        aligned = pd.concat([y_val_aligned, y_hat_series], axis=1).dropna()
+        y_val_aligned = aligned.iloc[:, 0].to_numpy()
+        y_hat_aligned = aligned.iloc[:, 1].to_numpy()
+
+        mse = float(mean_squared_error(y_val_aligned, y_hat_aligned))
+        mae = float(mean_absolute_error(y_val_aligned, y_hat_aligned))
+        corr = _corr(y_val_aligned, y_hat_aligned)
+        spearman = _spearman_corr(y_val_aligned, y_hat_aligned)
+        if target_type == "return":
+            directional_acc = _directional_accuracy(y_val_aligned, y_hat_aligned)
+        else:
+            directional_acc = float("nan")
         nonzero = int(np.sum(np.abs(model.coef_) > 1e-8))
 
         results.append(
@@ -199,6 +246,7 @@ def walk_forward_train(
                 mse=mse,
                 mae=mae,
                 corr=corr,
+                spearman=spearman,
                 directional_acc=directional_acc,
                 nonzero=nonzero,
             )
@@ -221,6 +269,7 @@ def walk_forward_train(
         "train_days": train_days,
         "val_days": val_days,
         "step_days": step_days,
+        "target_type": target_type,
         "feature_list": feature_cols,
         "windows": [r.__dict__ for r in results],
         "last_window": results[-1].__dict__ if results else None,
