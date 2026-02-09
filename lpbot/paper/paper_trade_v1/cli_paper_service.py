@@ -89,6 +89,8 @@ def _build_runner_cmd() -> list[str]:
         "POOL_ADDRESS": "--pool",
         "PRICE_1M_CSV": "--price-1m-csv",
         "PRICE_5M_CSV": "--price-5m-csv",
+        "PRICE_START": "--price-start",
+        "PRICE_LOOKBACK_DAYS": "--price-lookback-days",
         "VOLUME_CSV": "--volume-csv",
         "EXPOSURE_CSV": "--exposure-csv",
         "PAPER_LOG": "--paper-log",

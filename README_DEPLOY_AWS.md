@@ -32,6 +32,7 @@ git clone https://github.com/softhefrenchguy/LPBot.git
 cd LPBot
 cp .env.example .env
 # edit .env and set GRAPH_KEY (required)
+# optional: set PRICE_START or PRICE_LOOKBACK_DAYS to limit initial backfill
 
 # build + run
 sudo docker compose up -d --build

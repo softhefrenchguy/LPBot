@@ -115,13 +115,33 @@ def _append_rows(path: Path, df: pd.DataFrame) -> None:
     df.to_csv(path, mode="a", index=False, header=write_header)
 
 
-def update_binance_1m(symbol: str, out_csv: Path) -> bool:
+def _parse_price_start(price_start: str | None, lookback_days: int | None) -> datetime:
+    if price_start:
+        try:
+            dt = datetime.strptime(price_start, "%Y-%m-%d")
+            return dt.replace(tzinfo=timezone.utc)
+        except ValueError as exc:
+            raise ValueError("price_start must be YYYY-MM-DD") from exc
+    if lookback_days is not None:
+        if lookback_days <= 0:
+            raise ValueError("price_lookback_days must be positive.")
+        return _utc_now_minute() - timedelta(days=lookback_days)
+    return datetime(2021, 1, 1, tzinfo=timezone.utc)
+
+
+def update_binance_1m(
+    symbol: str,
+    out_csv: Path,
+    price_start: str | None,
+    price_lookback_days: int | None,
+) -> bool:
     last_ts = _read_last_timestamp_ms(out_csv)
     now = _utc_now_minute()
     end_ms = _dt_to_ms(now)
 
     if last_ts is None:
-        start_ms = _dt_to_ms(datetime(2021, 1, 1, tzinfo=timezone.utc))
+        start_dt = _parse_price_start(price_start, price_lookback_days)
+        start_ms = _dt_to_ms(start_dt)
     else:
         start_ms = last_ts + 60_000
 
@@ -335,6 +355,14 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Run end-to-end paper trade update.")
     p.add_argument("--symbol", default="ETHUSDC")
     p.add_argument("--bar-minutes", type=int, default=5)
+    p.add_argument("--price-start", default=os.environ.get("PRICE_START"))
+    p.add_argument(
+        "--price-lookback-days",
+        type=int,
+        default=int(os.environ.get("PRICE_LOOKBACK_DAYS"))
+        if os.environ.get("PRICE_LOOKBACK_DAYS")
+        else None,
+    )
 
     p.add_argument("--graph-api-key-env", default="GRAPH_KEY")
     p.add_argument("--subgraph-id", default="FbCGRftH4a3yZugY7TnbYgPJVEv2LvMT6oF1fxPe9aJM")
@@ -388,7 +416,12 @@ def main() -> None:
     volume_csv = Path(args.volume_csv)
 
     print("Updating 1m price data...")
-    updated = update_binance_1m(args.symbol, price_1m)
+    updated = update_binance_1m(
+        args.symbol,
+        price_1m,
+        price_start=args.price_start,
+        price_lookback_days=args.price_lookback_days,
+    )
 
     if updated:
         print("Resampling to 5m...")
