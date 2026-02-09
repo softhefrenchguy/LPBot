@@ -44,6 +44,27 @@ def _read_last_timestamp_ms(path: Path) -> Optional[int]:
     return ts_val
 
 
+def _is_lfs_pointer(path: Path) -> bool:
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as f:
+            first = f.readline().strip()
+        return first.startswith("version https://git-lfs.github.com/spec/v1")
+    except Exception:
+        return False
+
+
+def _price_file_valid(path: Path) -> bool:
+    if not path.exists() or path.stat().st_size == 0:
+        return False
+    if _is_lfs_pointer(path):
+        return False
+    try:
+        cols = list(pd.read_csv(path, nrows=0).columns)
+    except Exception:
+        return False
+    return "timestamp" in cols
+
+
 def _fetch_binance_1m(symbol: str, start_ms: int, end_ms: int) -> list:
     session = requests.Session()
     rows = []
@@ -135,7 +156,12 @@ def update_binance_1m(
     price_start: str | None,
     price_lookback_days: int | None,
 ) -> bool:
-    last_ts = _read_last_timestamp_ms(out_csv)
+    if not _price_file_valid(out_csv):
+        if out_csv.exists():
+            out_csv.unlink()
+        last_ts = None
+    else:
+        last_ts = _read_last_timestamp_ms(out_csv)
     now = _utc_now_minute()
     end_ms = _dt_to_ms(now)
 
