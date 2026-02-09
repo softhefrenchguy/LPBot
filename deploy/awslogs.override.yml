@@ -1,0 +1,9 @@
+services:
+  lpbot:
+    logging:
+      driver: awslogs
+      options:
+        awslogs-group: ${AWSLOGS_GROUP}
+        awslogs-region: ${AWS_REGION}
+        awslogs-stream: lpbot
+        awslogs-create-group: "true"
