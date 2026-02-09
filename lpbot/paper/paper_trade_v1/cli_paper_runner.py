@@ -231,6 +231,11 @@ def update_volume_5m(
     bar_minutes: int,
     start_date: Optional[str],
 ) -> None:
+    if bar_minutes != 5:
+        raise RuntimeError("Only bar_minutes=5 is supported for volume fetch.")
+    if not graph_api_key:
+        raise RuntimeError("GRAPH_KEY is required for volume fetch.")
+
     if out_csv.exists() and out_csv.stat().st_size > 0:
         try:
             last_ts = pd.read_csv(out_csv, usecols=["timestamp"]).tail(1)["timestamp"].iloc[0]
@@ -240,28 +245,92 @@ def update_volume_5m(
         except Exception:
             pass
 
-    end_date = (_utc_now_minute() + timedelta(days=1)).strftime("%Y-%m-%d")
+    if not start_date:
+        start_date = "2021-01-01"
 
-    cmd = [
-        "python",
-        "-m",
-        "lpbot.data_sources.uniswap_v3_subgraph.cli_fetch_pool_volume_5m",
-        "--graph-api-key",
-        graph_api_key,
-        "--subgraph-id",
-        subgraph_id,
-        "--pool",
-        pool,
-        "--start",
-        start_date,
-        "--end",
-        end_date,
-        "--bar-minutes",
-        str(bar_minutes),
-        "--out",
-        str(out_csv),
+    end_date = (_utc_now_minute() + timedelta(days=1)).strftime("%Y-%m-%d")
+    start_ts = pd.to_datetime(start_date, utc=True)
+    end_ts = pd.to_datetime(end_date, utc=True)
+    if end_ts <= start_ts:
+        raise RuntimeError("end_date must be after start_date for volume fetch.")
+
+    subgraph_url = f"https://gateway.thegraph.com/api/{graph_api_key}/subgraphs/id/{subgraph_id}"
+    pool = pool.lower()
+
+    query = (
+        "query($pool: String!, $cursor: Int!) { "
+        "poolHourDatas(first: 1000, orderBy: periodStartUnix, orderDirection: desc, "
+        "where: { pool: $pool, periodStartUnix_lt: $cursor }) { "
+        "periodStartUnix volumeUSD } }"
+    )
+
+    cursor = int(end_ts.timestamp()) + 3600
+    start_unix = int(start_ts.timestamp())
+    end_unix = int(end_ts.timestamp())
+
+    rows: list[tuple[int, float]] = []
+    last_cursor = None
+
+    while True:
+        payload = {"query": query, "variables": {"pool": pool, "cursor": cursor}}
+        resp = requests.post(subgraph_url, json=payload, timeout=30)
+        if resp.status_code != 200:
+            raise RuntimeError(f"GraphQL HTTP {resp.status_code}: {resp.text[:200]}")
+        data = resp.json()
+        if "errors" in data:
+            raise RuntimeError(f"GraphQL errors: {data['errors']}")
+        page = data.get("data", {}).get("poolHourDatas", [])
+        if not page:
+            break
+
+        min_ts = None
+        for row in page:
+            try:
+                ts = int(row["periodStartUnix"])
+                vol = float(row.get("volumeUSD") or 0.0)
+            except Exception:
+                continue
+            if ts < start_unix or ts >= end_unix:
+                continue
+            rows.append((ts, vol))
+            if min_ts is None or ts < min_ts:
+                min_ts = ts
+
+        if min_ts is None:
+            break
+        if last_cursor is not None and min_ts >= last_cursor:
+            break
+        last_cursor = min_ts
+        cursor = int(min_ts)
+        if cursor <= start_unix:
+            break
+        time.sleep(0.2)
+
+    if not rows:
+        raise RuntimeError("No hourly volume rows fetched for requested range.")
+
+    raw_df = pd.DataFrame(rows, columns=["timestamp_hour", "volume_usd_hour"])
+    raw_df["timestamp_hour"] = pd.to_datetime(raw_df["timestamp_hour"], unit="s", utc=True)
+    raw_df = raw_df.sort_values("timestamp_hour").drop_duplicates(subset=["timestamp_hour"])
+    raw_df = raw_df[
+        (raw_df["timestamp_hour"] >= start_ts) & (raw_df["timestamp_hour"] < end_ts)
     ]
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
+
+    expanded: list[tuple[pd.Timestamp, float]] = []
+    for _, row in raw_df.iterrows():
+        base_ts = row["timestamp_hour"]
+        vol = float(row["volume_usd_hour"]) / 12.0
+        for k in range(12):
+            expanded.append((base_ts + pd.Timedelta(minutes=5 * k), vol))
+
+    vol_df = pd.DataFrame(expanded, columns=["timestamp", "volume_usd"])
+    full_index = pd.date_range(start=start_ts, end=end_ts, freq="5min", inclusive="left")
+    vol_df = vol_df.set_index("timestamp").groupby(level=0)["volume_usd"].sum()
+    vol_df = vol_df.reindex(full_index).fillna(0.0)
+    vol_df = vol_df.reset_index().rename(columns={"index": "timestamp"})
+
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    vol_df.to_csv(out_csv, index=False)
 
 
 def update_exposure(
