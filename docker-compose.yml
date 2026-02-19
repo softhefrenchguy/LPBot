@@ -13,3 +13,27 @@ services:
       interval: 60s
       timeout: 10s
       retries: 3
+
+  lpbot-report:
+    build: .
+    env_file:
+      - .env
+    restart: unless-stopped
+    command:
+      - python
+      - -m
+      - lpbot.paper.paper_trade_v1.cli_paper_report_server
+      - --log-csv
+      - ${REPORT_LOG_CSV:-artifacts/paper/paper_log.csv}
+      - --out
+      - ${REPORT_OUT_HTML:-artifacts/paper/report.html}
+      - --max-rows
+      - ${REPORT_MAX_ROWS:-5000}
+      - --interval-seconds
+      - ${REPORT_INTERVAL_SECONDS:-3600}
+      - --port
+      - ${REPORT_PORT:-8080}
+    ports:
+      - "${REPORT_PORT:-8080}:8080"
+    volumes:
+      - ./artifacts:/app/artifacts

@@ -63,6 +63,21 @@ Suggested alarms:
 - Container stopped / restarting repeatedly.
 - Heartbeat missing for N minutes (CloudWatch metric filter on `event=heartbeat`).
 
+## 7) Auto-updating HTML Report (optional)
+The compose file includes a `lpbot-report` service that regenerates
+`artifacts/paper/report.html` every hour and serves it over HTTP.
+
+Defaults (override in `.env`):
+- `REPORT_PORT=8080`
+- `REPORT_INTERVAL_SECONDS=3600`
+
+Access it at:
+```
+http://<EC2_PUBLIC_IP>:8080/report.html
+```
+
+Make sure your EC2 Security Group allows inbound TCP on `REPORT_PORT`.
+
 ## 6) Artifacts S3 Sync (Daily)
 Set these in `.env` to enable daily S3 sync:
 - `S3_BUCKET` (required)
