@@ -37,8 +37,11 @@ class _QuietHandler(SimpleHTTPRequestHandler):
 
 
 def _serve(directory: Path, bind: str, port: int) -> None:
+    directory = directory.resolve()
+    # Ensure the handler serves from the report directory
+    import os
+    os.chdir(directory)
     handler = _QuietHandler
-    handler.directory = str(directory)
     server = ThreadingHTTPServer((bind, port), handler)
     _json_log("report_server_start", bind=bind, port=port, dir=str(directory))
     server.serve_forever()
