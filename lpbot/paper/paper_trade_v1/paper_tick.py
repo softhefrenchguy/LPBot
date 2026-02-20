@@ -116,7 +116,16 @@ def compute_paper_rows(
 
     gate_bool = merged["gate"].fillna(False).astype(bool)
     weight = pd.to_numeric(merged["weight"], errors="coerce").fillna(0.0)
+    weight_raw = pd.to_numeric(merged.get("weight_raw"), errors="coerce")
     sigma_ann_smooth = pd.to_numeric(merged["sigma_ann_smooth"], errors="coerce")
+    sigma_ann_raw = pd.to_numeric(
+        merged.get("sigma_ann_raw", merged.get("sigma_ann")), errors="coerce"
+    )
+    trend_riskoff = merged.get("trend_riskoff", pd.Series(False, index=merged.index))
+    regime_riskoff = merged.get("regime_riskoff", pd.Series(False, index=merged.index))
+    panic_triggered = merged.get(
+        "panic_triggered", pd.Series(False, index=merged.index)
+    ).astype(bool)
 
     raw_on = (~gate_bool) & (weight > 0) & (sigma_ann_smooth < lp_vol_on)
     stable_on = (
@@ -165,7 +174,13 @@ def compute_paper_rows(
             "r": r,
             "gate": gate_bool,
             "weight": weight,
+            "weight_raw": weight_raw,
+            "trend_riskoff": trend_riskoff.astype(bool),
+            "regime_riskoff": regime_riskoff.astype(bool),
+            "panic_triggered": panic_triggered,
+            "sigma_ann_raw": sigma_ann_raw,
             "sigma_ann_smooth": sigma_ann_smooth,
+            "lp_raw_on": raw_on,
             "lp_on": lp_on,
             "lp_weight": lp_weight,
             "in_range_frac_eff": in_range_frac_eff_series,
@@ -186,7 +201,13 @@ def compute_paper_rows(
             "r",
             "gate",
             "weight",
+            "weight_raw",
+            "trend_riskoff",
+            "regime_riskoff",
+            "panic_triggered",
+            "sigma_ann_raw",
             "sigma_ann_smooth",
+            "lp_raw_on",
             "lp_on",
             "lp_weight",
             "in_range_frac_eff",

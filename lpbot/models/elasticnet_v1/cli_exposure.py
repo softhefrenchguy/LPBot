@@ -164,17 +164,18 @@ def main() -> None:
         gate = regime_riskoff | trend_riskoff
 
     denom = out_df["sigma_ann_smooth"]
-    weight = args.target_vol / denom
-    weight = weight.where(denom > 0)
-    weight = weight.replace([np.inf, -np.inf], np.nan)
-    forced_zero = weight.isna()
-    weight = weight.fillna(0.0)
-    weight = weight.clip(lower=0.0, upper=args.w_max)
+    weight_raw = args.target_vol / denom
+    weight_raw = weight_raw.where(denom > 0)
+    weight_raw = weight_raw.replace([np.inf, -np.inf], np.nan)
+    forced_zero = weight_raw.isna()
+    weight_raw = weight_raw.fillna(0.0)
+    weight_raw = weight_raw.clip(lower=0.0, upper=args.w_max)
 
     panic_mask = out_df["sigma_ann_smooth"] > args.panic_vol
-    weight = weight.mask(panic_mask, 0.0)
+    weight_raw = weight_raw.mask(panic_mask, 0.0)
     forced_zero = forced_zero | panic_mask
 
+    weight = weight_raw.copy()
     weight = weight.mask(gate.values, 0.0)
     forced_zero = forced_zero | gate.values
 
@@ -182,6 +183,9 @@ def main() -> None:
         weight = weight.mask(~forced_zero, weight.clip(lower=args.min_weight, upper=args.w_max))
 
     out_df["weight"] = weight
+    out_df["weight_raw"] = weight_raw
+    out_df["panic_triggered"] = panic_mask.to_numpy()
+    out_df["sigma_ann_raw"] = out_df["sigma_ann"]
     out_df["close"] = close_series.reindex(out_df["timestamp"]).to_numpy()
     out_df["trend_riskoff"] = trend_riskoff.to_numpy()
     out_df["regime_riskoff"] = regime_riskoff.to_numpy()
@@ -191,11 +195,14 @@ def main() -> None:
             "timestamp",
             "close",
             "weight",
+            "weight_raw",
             "yhat",
+            "sigma_ann_raw",
             "sigma_ann_smooth",
             "trend_riskoff",
             "regime_riskoff",
             "gate",
+            "panic_triggered",
         ]
     ]
 

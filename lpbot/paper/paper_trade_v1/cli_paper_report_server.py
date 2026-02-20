@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone
@@ -51,7 +52,11 @@ def _render_loop(args: argparse.Namespace) -> None:
     while True:
         try:
             _json_log("report_generate_start")
-            generate_report_args = [
+            # Run report generator as a subprocess to avoid blocking the server thread
+            cmd = [
+                "python",
+                "-m",
+                "lpbot.paper.paper_trade_v1.cli_paper_report",
                 "--log-csv",
                 args.log_csv,
                 "--out",
@@ -59,17 +64,21 @@ def _render_loop(args: argparse.Namespace) -> None:
                 "--max-rows",
                 str(args.max_rows),
             ]
-            generate_report.__wrapped__ if hasattr(generate_report, "__wrapped__") else None
-            # Call report generator in-process
-            import sys
-
-            old_argv = sys.argv
-            sys.argv = ["cli_paper_report.py", *generate_report_args]
-            try:
-                generate_report()
-            finally:
-                sys.argv = old_argv
+            timeout_sec = max(60, min(900, args.interval_seconds - 5))
+            subprocess.run(
+                cmd,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd="/app",
+                timeout=timeout_sec,
+            )
             _json_log("report_generate_complete")
+        except subprocess.TimeoutExpired:
+            _json_log("report_generate_error", error="timeout")
+        except subprocess.CalledProcessError as exc:
+            _json_log("report_generate_error", error=exc.stderr.strip()[:1000])
         except Exception as exc:
             _json_log("report_generate_error", error=str(exc))
         time.sleep(args.interval_seconds)

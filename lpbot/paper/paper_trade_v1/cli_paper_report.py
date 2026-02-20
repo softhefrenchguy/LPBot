@@ -33,12 +33,19 @@ def main() -> None:
     df["combined_r"] = pd.to_numeric(df.get("combined_r"), errors="coerce").fillna(0.0)
     df["r"] = pd.to_numeric(df.get("r"), errors="coerce").fillna(0.0)
 
+    close = pd.to_numeric(df.get("close"), errors="coerce").ffill()
+    df = df[close.notna()].copy()
+    close = close.loc[df.index]
+
     df["core_eq"] = np.exp(df["core_r"].cumsum())
     df["combined_eq"] = np.exp(df["combined_r"].cumsum())
-    df["spot_eq"] = np.exp(df["r"].cumsum())
+    spot_r = np.log(close / close.shift(1)).fillna(0.0)
+    df["spot_eq"] = np.exp(spot_r.cumsum())
 
     peak = np.maximum.accumulate(df["combined_eq"].values)
     drawdown = df["combined_eq"].values / peak - 1.0
+    spot_peak = np.maximum.accumulate(df["spot_eq"].values)
+    spot_drawdown = df["spot_eq"].values / spot_peak - 1.0
 
     bar_minutes = 5
     bars_per_year = 365 * 24 * (60 / bar_minutes)
@@ -49,8 +56,9 @@ def main() -> None:
         "core_eq": df["core_eq"].tolist(),
         "combined_eq": df["combined_eq"].tolist(),
         "spot_eq": df["spot_eq"].tolist(),
-        "price": pd.to_numeric(df.get("close"), errors="coerce").ffill().fillna(0.0).tolist(),
+        "price": close.fillna(0.0).tolist(),
         "drawdown": drawdown.tolist(),
+        "spot_drawdown": spot_drawdown.tolist(),
         "vol": vol.fillna(0.0).tolist(),
         "weight": pd.to_numeric(df.get("weight"), errors="coerce").fillna(0.0).tolist(),
         "lp_on": df.get("lp_on", pd.Series([False] * len(df))).astype(bool).tolist(),
@@ -100,8 +108,9 @@ Plotly.newPlot('vol', [
 ], {{title: 'Rolling Volatility (ann)', margin: {{t: 40}}}});
 
 Plotly.newPlot('drawdown', [
-  {{x: ts, y: data.drawdown, name: 'Drawdown', line: {{color:'#d62728'}}}},
-], {{title: 'Drawdown (Combined)', margin: {{t: 40}}}});
+  {{x: ts, y: data.drawdown, name: 'Combined Drawdown', line: {{color:'#d62728'}}}},
+  {{x: ts, y: data.spot_drawdown, name: 'Spot Drawdown', line: {{color:'#7f7f7f'}}}},
+], {{title: 'Drawdown', margin: {{t: 40}}}});
 
 Plotly.newPlot('weight', [
   {{x: ts, y: data.weight, name: 'Weight', line: {{color:'#ff7f0e'}}}},
