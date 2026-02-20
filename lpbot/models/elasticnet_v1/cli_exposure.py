@@ -38,6 +38,32 @@ def _horizon_bars(horizon_minutes: float, bar_minutes: int) -> int:
     return max(1, int(round(bars)))
 
 
+def _trend_riskoff_with_hyst(
+    close: pd.Series, ema: pd.Series, hyst: float
+) -> pd.Series:
+    if hyst <= 0:
+        return close < ema
+    upper = ema * (1.0 + hyst)
+    lower = ema * (1.0 - hyst)
+    out = np.zeros(len(close), dtype=bool)
+    is_riskoff = False
+    for i in range(len(close)):
+        c = close.iat[i]
+        lo = lower.iat[i]
+        hi = upper.iat[i]
+        if np.isnan(c) or np.isnan(lo) or np.isnan(hi):
+            out[i] = is_riskoff
+            continue
+        if is_riskoff:
+            if c > hi:
+                is_riskoff = False
+        else:
+            if c < lo:
+                is_riskoff = True
+        out[i] = is_riskoff
+    return pd.Series(out, index=close.index)
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--input-1m", required=True)
@@ -51,6 +77,12 @@ def main() -> None:
     p.add_argument("--trend-filter", choices=["none", "ema"], default="ema")
     p.add_argument("--trend-timeframe", choices=["same", "1h", "1d"], default="1h")
     p.add_argument("--trend-ema", type=int, default=200)
+    p.add_argument(
+        "--trend-hyst",
+        type=float,
+        default=0.0,
+        help="Hysteresis band around EMA as fraction (e.g. 0.002 = 0.2%).",
+    )
     p.add_argument("--riskoff-mode", choices=["none", "regime", "trend", "both"], default="both")
     p.add_argument("--min-weight", type=float, default=0.0)
     p.add_argument("--target-vol", type=float, required=True)
@@ -87,13 +119,17 @@ def main() -> None:
     else:
         if args.trend_timeframe == "same":
             ema_trend = close_series.ewm(span=args.trend_ema, adjust=False).mean()
-            trend_riskoff = close_series < ema_trend
+            trend_riskoff = _trend_riskoff_with_hyst(
+                close_series, ema_trend, float(args.trend_hyst)
+            )
         else:
             rule = "1h" if args.trend_timeframe == "1h" else "1d"
             close_resampled = close_series.resample(rule).last().dropna()
             ema_resampled = close_resampled.ewm(span=args.trend_ema, adjust=False).mean()
             ema_trend = ema_resampled.reindex(close_series.index, method="ffill")
-            trend_riskoff = close_series < ema_trend
+            trend_riskoff = _trend_riskoff_with_hyst(
+                close_series, ema_trend, float(args.trend_hyst)
+            )
 
     features = build_features(
         df_1m=df_1m,

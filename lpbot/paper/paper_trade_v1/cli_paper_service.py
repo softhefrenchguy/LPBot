@@ -103,6 +103,7 @@ def _build_runner_cmd() -> list[str]:
         "TREND_FILTER": "--trend-filter",
         "TREND_TIMEFRAME": "--trend-timeframe",
         "TREND_EMA": "--trend-ema",
+        "TREND_HYST": "--trend-hyst",
         "FEE_TIER": "--fee-tier",
         "POOL_TVL_USD": "--pool-tvl-usd",
         "IN_RANGE_FRAC": "--in-range-frac",
