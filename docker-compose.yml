@@ -37,3 +37,36 @@ services:
       - "${REPORT_PORT:-8080}:8080"
     volumes:
       - ./artifacts:/app/artifacts
+
+  breakout-paper:
+    build: .
+    env_file:
+      - .env
+    restart: unless-stopped
+    command:
+      - python
+      - /app/scripts/breakout_paper_service.py
+      - --price-5m
+      - data/ETHUSDC_5m.csv
+      - --lookback
+      - ${BREAKOUT_LOOKBACK:-96}
+      - --compress-window
+      - ${BREAKOUT_COMPRESS_WINDOW:-96}
+      - --compress-quantile
+      - ${BREAKOUT_COMPRESS_QUANTILE:-0.50}
+      - --hold-bars
+      - ${BREAKOUT_HOLD_BARS:-24}
+      - --target-vol
+      - ${BREAKOUT_TARGET_VOL:-0.25}
+      - --w-max
+      - ${BREAKOUT_W_MAX:-1.0}
+      - --vol-window
+      - ${BREAKOUT_VOL_WINDOW:-36}
+      - --interval-sec
+      - ${BREAKOUT_INTERVAL_SECONDS:-300}
+      - --out
+      - ${BREAKOUT_OUT_CSV:-artifacts/paper/breakout_paper.csv}
+    volumes:
+      - ./data:/app/data
+      - ./artifacts:/app/artifacts
+      - ./logs:/app/logs
