@@ -77,6 +77,11 @@ def main() -> None:
             else:
                 df["eq"] = 1.0
 
+        # Rebase equity to 1.0 for the displayed window
+        first_eq = float(df["eq"].iloc[0]) if len(df) else 1.0
+        if first_eq != 0:
+            df["eq"] = df["eq"] / first_eq
+
         last_ts = df["timestamp"].iloc[-1] if "timestamp" in df.columns else None
         avg_weight = float(df["weight"].fillna(0.0).mean()) if "weight" in df.columns else 0.0
         time_in_market = float((df.get("weight", 0.0) > 0).mean()) * 100 if "weight" in df.columns else 0.0
