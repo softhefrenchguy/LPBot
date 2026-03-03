@@ -70,3 +70,22 @@ services:
       - ./data:/app/data
       - ./artifacts:/app/artifacts
       - ./logs:/app/logs
+
+  breakout-report:
+    build: .
+    env_file:
+      - .env
+    restart: unless-stopped
+    command:
+      - python
+      - /app/scripts/breakout_paper_report.py
+      - --log-csv
+      - ${BREAKOUT_OUT_CSV:-artifacts/paper/breakout_paper.csv}
+      - --out
+      - ${BREAKOUT_REPORT_HTML:-artifacts/paper/breakout_report.html}
+      - --max-rows
+      - ${BREAKOUT_REPORT_MAX_ROWS:-2000}
+      - --interval-seconds
+      - ${BREAKOUT_REPORT_INTERVAL_SECONDS:-300}
+    volumes:
+      - ./artifacts:/app/artifacts
