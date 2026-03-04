@@ -36,6 +36,9 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Breakout paper report generator")
     p.add_argument("--log-csv", default="artifacts/paper/breakout_paper.csv")
     p.add_argument("--out", default="artifacts/paper/breakout_report.html")
+    p.add_argument("--daily-out-csv", default="artifacts/paper/breakout_daily_summary.csv")
+    p.add_argument("--daily-days", type=int, default=14)
+    p.add_argument("--trade-cost-bps", type=float, default=5.0)
     p.add_argument("--max-rows", type=int, default=2000)
     p.add_argument("--interval-seconds", type=int, default=300)
     p.add_argument("--once", action="store_true")
@@ -43,7 +46,9 @@ def main() -> None:
 
     log_path = Path(args.log_csv)
     out_path = Path(args.out)
+    daily_out_path = Path(args.daily_out_csv)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    daily_out_path.parent.mkdir(parents=True, exist_ok=True)
 
     while True:
         if not log_path.exists():
@@ -64,6 +69,7 @@ def main() -> None:
         if "timestamp" in df.columns:
             df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
             df = df.dropna(subset=["timestamp"]).sort_values("timestamp")
+        df_all = df.copy()
         df = df.tail(args.max_rows).copy()
 
         for col in ["close", "weight", "core_r", "eq"]:
@@ -91,9 +97,79 @@ def main() -> None:
         weight_vals = [round(x, 6) for x in df.get("weight", pd.Series([0.0]*len(df))).fillna(0.0).tolist()]
         close_vals = [round(x, 6) for x in df.get("close", pd.Series([0.0]*len(df))).fillna(0.0).tolist()]
 
+        daily_table_html = "<div class='meta'>daily summary unavailable</div>"
+        if {"timestamp", "weight", "core_r"}.issubset(df_all.columns):
+            full = df_all.copy()
+            full["weight"] = pd.to_numeric(full["weight"], errors="coerce").fillna(0.0)
+            full["core_r"] = pd.to_numeric(full["core_r"], errors="coerce").fillna(0.0)
+            full["weight_prev"] = full["weight"].shift(1).fillna(0.0)
+            full["turnover"] = (full["weight"] - full["weight_prev"]).abs()
+            full["trade_cost_r"] = -full["turnover"] * (args.trade_cost_bps / 10000.0)
+            full["net_r"] = full["core_r"] + full["trade_cost_r"]
+            full["active"] = full["weight_prev"] > 0
+            full["date"] = full["timestamp"].dt.date
+
+            records = []
+            for d, g in full.groupby("date", sort=True):
+                gross_eq = np.exp(np.cumsum(g["core_r"]))
+                net_eq = np.exp(np.cumsum(g["net_r"]))
+                net_peak = np.maximum.accumulate(net_eq)
+                net_mdd = float((net_eq / net_peak - 1.0).min()) if len(net_eq) else 0.0
+                active = g["active"]
+                hit = float((g.loc[active, "core_r"] > 0).mean() * 100.0) if active.any() else np.nan
+
+                records.append(
+                    {
+                        "date": str(d),
+                        "bars": int(len(g)),
+                        "daily_return_gross": float(gross_eq.iloc[-1] - 1.0),
+                        "daily_return_net": float(net_eq.iloc[-1] - 1.0),
+                        "daily_max_dd_net": net_mdd,
+                        "turnover": float(g["turnover"].sum()),
+                        "avg_weight": float(g["weight"].mean()),
+                        "time_in_market_pct": float((g["weight"] > 0).mean() * 100.0),
+                        "hit_rate_active_pct": hit,
+                    }
+                )
+
+            daily = pd.DataFrame(records)
+            daily.to_csv(daily_out_path, index=False)
+            daily_show = daily.tail(args.daily_days).copy()
+            daily_show = daily_show.iloc[::-1]
+
+            rows_html = []
+            for _, row in daily_show.iterrows():
+                hit_txt = "" if pd.isna(row["hit_rate_active_pct"]) else f"{row['hit_rate_active_pct']:.2f}%"
+                rows_html.append(
+                    "<tr>"
+                    f"<td style='text-align:center'>{row['date']}</td>"
+                    f"<td>{int(row['bars'])}</td>"
+                    f"<td>{row['daily_return_gross']:.4%}</td>"
+                    f"<td>{row['daily_return_net']:.4%}</td>"
+                    f"<td>{row['daily_max_dd_net']:.4%}</td>"
+                    f"<td>{row['turnover']:.4f}</td>"
+                    f"<td>{row['avg_weight']:.4f}</td>"
+                    f"<td>{row['time_in_market_pct']:.2f}%</td>"
+                    f"<td>{hit_txt}</td>"
+                    "</tr>"
+                )
+
+            daily_table_html = (
+                "<div class='card'>"
+                f"<div class='meta'>Daily summary (last {args.daily_days} days) | estimated cost: {args.trade_cost_bps:.2f} bps per unit turnover | csv: {daily_out_path}</div>"
+                "<table>"
+                "<tr>"
+                "<th>Date</th><th>Bars</th><th>Gross Return</th><th>Net Return</th><th>Net Max DD</th>"
+                "<th>Turnover</th><th>Avg Weight</th><th>Time In Market</th><th>Hit Rate (active)</th>"
+                "</tr>"
+                + "".join(rows_html)
+                + "</table></div>"
+            )
+
         body = f"""
 <h2>Breakout Paper Report</h2>
 <div class="meta">rows: {len(df)} | last_ts: {last_ts} | avg_weight: {avg_weight:.4f} | time_in_market: {time_in_market:.2f}%</div>
+{daily_table_html}
 <div class="card">
   <canvas id="eq" height="140"></canvas>
 </div>
