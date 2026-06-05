@@ -15,6 +15,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--volume-csv", required=True)
     p.add_argument("--bar-minutes", type=int, default=5)
     p.add_argument("--fee-tier", type=float, required=True)
+    p.add_argument("--trade-cost-bps", type=float, default=0.0)
     p.add_argument("--pool-tvl-usd", type=float, required=True)
     p.add_argument("--in-range-frac", type=float, required=True)
     p.add_argument("--range-sigma", type=float, required=True)
@@ -45,6 +46,7 @@ def main() -> None:
         volume,
         bar_minutes=args.bar_minutes,
         fee_tier=args.fee_tier,
+        trade_cost_bps=args.trade_cost_bps,
         pool_tvl_usd=args.pool_tvl_usd,
         in_range_frac=args.in_range_frac,
         range_sigma=args.range_sigma,

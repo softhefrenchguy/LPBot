@@ -32,6 +32,13 @@ def main() -> None:
     p.add_argument("--compress-window", type=int, default=288, help="Compression window in bars")
     p.add_argument("--compress-quantile", type=float, default=0.25)
     p.add_argument("--hold-bars", type=int, default=0, help="Hold N bars after breakout")
+    p.add_argument("--trend-ema", type=int, default=0, help="Optional trend EMA on higher timeframe (bars)")
+    p.add_argument(
+        "--trend-timeframe",
+        choices=["same", "1h", "4h", "1d"],
+        default="same",
+        help="Timeframe for trend EMA (default: same)",
+    )
     p.add_argument("--target-vol", type=float, default=0.25)
     p.add_argument("--w-max", type=float, default=1.0)
     p.add_argument("--vol-window", type=int, default=36)
@@ -60,6 +67,24 @@ def main() -> None:
     breakout = (close > rolling_high.shift(1)) & compress.shift(1)
     breakdown = (close < rolling_low.shift(1)) & compress.shift(1)
 
+    # optional higher-timeframe trend filter
+    if args.trend_ema and args.trend_ema > 0:
+        tf_map = {"same": f"{args.bar_minutes}min", "1h": "1h", "4h": "4h", "1d": "1d"}
+        tf = tf_map[args.trend_timeframe]
+        # Use raw values to avoid label alignment against RangeIndex, which would create NaNs.
+        tmp = pd.DataFrame({"close": close.to_numpy()}, index=df["timestamp"])
+        if tf == f"{args.bar_minutes}min":
+            trend_close = tmp["close"]
+            trend_ema = trend_close.ewm(span=args.trend_ema, adjust=False).mean()
+            trend_on = (trend_close > trend_ema).values
+        else:
+            # Use only completed higher-timeframe bars to avoid lookahead bias.
+            trend_close = tmp["close"].resample(tf).last().shift(1).ffill()
+            trend_ema = trend_close.ewm(span=args.trend_ema, adjust=False).mean()
+            trend_on = (trend_close > trend_ema).reindex(tmp.index, method="ffill").to_numpy()
+    else:
+        trend_on = np.ones(len(df), dtype=bool)
+
     sigma_ann = _compute_sigma_ann(r, args.bar_minutes, args.vol_window)
     weight_raw = (args.target_vol / sigma_ann).replace([np.inf, -np.inf], np.nan)
     weight_raw = weight_raw.fillna(0.0).clip(lower=0.0, upper=args.w_max)
@@ -79,6 +104,9 @@ def main() -> None:
             hold -= 1
         else:
             gate_on[i] = breakout.iat[i]
+
+        if not trend_on[i]:
+            gate_on[i] = False
     weight = weight_raw * gate_on.astype(float)
 
     core_r = weight.shift(1).fillna(0.0) * r
@@ -96,6 +124,7 @@ def main() -> None:
             "compress": compress,
             "breakout": breakout,
             "breakdown": breakdown,
+            "trend_on": trend_on,
             "gate_on": gate_on,
             "sigma_ann": sigma_ann,
             "weight_raw": weight_raw,

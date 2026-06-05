@@ -1,111 +1,61 @@
-﻿# LPBot — Regime-First Market Analysis
+# LPBot
 
-This project builds a **strategy-neutral market regime detector** and uses it to evaluate whether liquidity provision (LP) strategies are profitable **conditional on regime**.
+LPBot is the research and paper-trading repo for the ETH/BTC strategy stack.
 
-The core principle is simple:
+The current live system is a paper-trading bot: it builds daily regime, offensive, defensive, BTC, gold, market, and news diagnostics, then posts a Discord summary. It does not execute real-money trades.
 
-> **Regimes first. Strategies second. No assumptions.**
+## Current Live Stack
 
----
+- ETH sleeve: EMA 21/55/144 offensive signal, regime routing, defensive funding model, paper trade tracking.
+- BTC sleeve: EMA 21/55/144 with 5-day confirmation, BTC funding features, regime routing, paper trade tracking.
+- Gold sleeve: PAXG paper rotation gate for BEAR + flat ETH + PAXG EMA alignment.
+- Market tracker: daily macro/commodity/crypto snapshot.
+- News watcher: 12-hour RSS filter plus Claude macro event classifier.
+- Operations target: Hetzner cron + Docker Compose.
 
-## 🔒 Current Status — Frozen v1
+## Repository Map
 
-The regime detector is **frozen at v1.0**.
+- `scripts/`: live runners, backtests, diagnostics, and research scripts.
+- `lpbot/`: older package modules and retained strategy components.
+- `config/`, `deploy/`, `Dockerfile`, `docker-compose.yml`: deployment and runtime config.
+- `docs/`: project map, script inventory, operating instructions, and artifact policy.
+- `data/`, `artifacts/`, `logs/`, `models/`: local/generated only, intentionally ignored by git.
 
-No further changes to regime logic should be made unless explicitly creating v2.
+## Start Here
 
----
+Read these in order:
 
-## Assets
-- BTCUSDC
-- ETHUSDC  
-(SOL intentionally excluded due to structural data issues)
+1. [Project Map](docs/PROJECT_MAP.md)
+2. [Script Inventory](docs/SCRIPT_INVENTORY.md)
+3. [Operations](docs/OPERATIONS.md)
+4. [Artifact Policy](docs/ARTIFACT_POLICY.md)
+5. [GitHub Setup](docs/GITHUB_SETUP.md)
 
----
+## Local Setup
 
-## Regime Layers
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+copy .env.example .env
+```
 
-### Micro Regimes
-- Timeframe: **1h**
-- Model: Gaussian HMM
-- Purpose: short-term volatility / activity structure
-- Typical duration: **~2–7 hours**
+Fill `.env` with local secrets and paths. Never commit `.env`.
 
-### Macro Regimes
-- Timeframe: **8h**
-- Model: Gaussian HMM
-- Purpose: day-scale market structure
-- Typical duration:
-  - ETH: **~24–38 hours**
-  - BTC: **~20–30 hours**
+## Daily Paper Check
 
-Macro regimes do **not** reliably appear on 1h or 4h bars with fast features alone.
+Linux/Hetzner:
 
----
+```bash
+scripts/run_paper_check_daily.sh
+```
 
-## Features (Frozen)
-- `r` — log return
-- `abs_r` — absolute return
-- `vol20` — rolling volatility of returns
-- `vol_z` — rolling volume z-score
+Windows/local:
 
-No slow features (trend, momentum, moving averages) are included in v1.
+```powershell
+.\scripts\run_paper_check_daily.ps1
+```
 
----
+## Important Rule
 
-## Data Rules
-- No forward-filling
-- Empty resample bins are dropped
-- Minimum underlying data enforced per bar
-- Health checks run automatically
-
-These rules are non-negotiable.
-
----
-
-## Repository Structure
-
-
-
-src/ Core logic (resampling, obs, HMM, LP)
-config/ Frozen configs and symbols
-scripts/ Entry-point runners
-data/ (local only, ignored by git)
-regimes/ (local only, ignored by git)
-
-
----
-
-## What This Project Is Not
-- ❌ A trading bot
-- ❌ A predictive model
-- ❌ An LP optimizer
-
-This is **measurement infrastructure**.
-
----
-
-## Next Workstream
-**Regime-conditional LP evaluation**
-
-Questions to answer:
-- In which regimes (if any) is LP profitable?
-- Are losses regime-specific or structural?
-- Does regime awareness improve risk-adjusted outcomes?
-
-LP logic will remain **fixed**.  
-Regimes are labels, not signals.
-
----
-
-## Versioning
-- `regime-v1.0` — frozen, reproducible baseline
-
-All future work must reference the regime version used.
-
----
-
-## Philosophy
-Most strategy failures come from assuming regimes.
-
-This project measures them instead.
+Generated data and paper-trading artifacts are not committed. The repo should contain code, configuration examples, and documentation only. Pull live CSVs from Hetzner or rebuild them locally when needed.

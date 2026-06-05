@@ -39,12 +39,12 @@ def _horizon_bars(horizon_minutes: float, bar_minutes: int) -> int:
 
 
 def _trend_riskoff_with_hyst(
-    close: pd.Series, ema: pd.Series, hyst: float
+    close: pd.Series, ema: pd.Series, hyst_on: float, hyst_off: float
 ) -> pd.Series:
-    if hyst <= 0:
+    if hyst_on <= 0 and hyst_off <= 0:
         return close < ema
-    upper = ema * (1.0 + hyst)
-    lower = ema * (1.0 - hyst)
+    upper = ema * (1.0 + max(hyst_on, 0.0))
+    lower = ema * (1.0 - max(hyst_off, 0.0))
     out = np.zeros(len(close), dtype=bool)
     is_riskoff = False
     for i in range(len(close)):
@@ -64,6 +64,53 @@ def _trend_riskoff_with_hyst(
     return pd.Series(out, index=close.index)
 
 
+def _apply_ramp(weight: pd.Series, trend_riskoff: pd.Series, ramp_bars: int) -> pd.Series:
+    if ramp_bars <= 0:
+        return weight
+    out = weight.to_numpy().copy()
+    ramp = 0
+    in_ramp = False
+    for i in range(len(out)):
+        if bool(trend_riskoff.iat[i]):
+            in_ramp = False
+            ramp = 0
+            continue
+        if i > 0 and bool(trend_riskoff.iat[i - 1]):
+            in_ramp = True
+            ramp = 0
+        if in_ramp:
+            ramp += 1
+            factor = min(1.0, ramp / float(ramp_bars))
+            out[i] = out[i] * factor
+            if factor >= 1.0:
+                in_ramp = False
+    return pd.Series(out, index=weight.index)
+
+
+def _apply_weight_controls(
+    weight: pd.Series, max_dw_per_bar: float, min_rebalance_delta: float
+) -> pd.Series:
+    if max_dw_per_bar <= 0 and min_rebalance_delta <= 0:
+        return weight
+    out = weight.to_numpy().copy()
+    if len(out) == 0:
+        return weight
+    prev = float(out[0])
+    for i in range(1, len(out)):
+        target = float(out[i])
+        if min_rebalance_delta > 0 and abs(target - prev) < min_rebalance_delta:
+            target = prev
+        if max_dw_per_bar > 0:
+            delta = target - prev
+            if delta > max_dw_per_bar:
+                target = prev + max_dw_per_bar
+            elif delta < -max_dw_per_bar:
+                target = prev - max_dw_per_bar
+        out[i] = target
+        prev = target
+    return pd.Series(out, index=weight.index)
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--input-1m", required=True)
@@ -81,13 +128,49 @@ def main() -> None:
         "--trend-hyst",
         type=float,
         default=0.0,
-        help="Hysteresis band around EMA as fraction (e.g. 0.002 = 0.2%).",
+        help="Symmetric hysteresis band around EMA as fraction (e.g. 0.002 = 0.2%).",
+    )
+    p.add_argument(
+        "--trend-hyst-on",
+        type=float,
+        default=None,
+        help="Turn risk-off -> risk-on when price > EMA*(1+hyst_on).",
+    )
+    p.add_argument(
+        "--trend-hyst-off",
+        type=float,
+        default=None,
+        help="Turn risk-on -> risk-off when price < EMA*(1-hyst_off).",
     )
     p.add_argument("--riskoff-mode", choices=["none", "regime", "trend", "both"], default="both")
+    p.add_argument(
+        "--trend-scale",
+        type=float,
+        default=0.0,
+        help="If >0 and trend risk-off, scale weight by this factor instead of forcing to 0.",
+    )
     p.add_argument("--min-weight", type=float, default=0.0)
     p.add_argument("--target-vol", type=float, required=True)
     p.add_argument("--w-max", type=float, default=1.0)
     p.add_argument("--panic-vol", type=float, default=1.0)
+    p.add_argument(
+        "--max-dw-per-bar",
+        type=float,
+        default=0.0,
+        help="Cap per-bar weight change magnitude (0 disables).",
+    )
+    p.add_argument(
+        "--min-rebalance-delta",
+        type=float,
+        default=0.0,
+        help="Ignore weight changes smaller than this threshold (0 disables).",
+    )
+    p.add_argument(
+        "--ramp-bars",
+        type=int,
+        default=0,
+        help="After trend flips risk-on, ramp weight over N bars (0 disables).",
+    )
     p.add_argument(
         "--riskoff-values",
         default="bear,0,2",
@@ -114,13 +197,16 @@ def main() -> None:
         regime_df = pd.read_csv(Path(args.regime_path))
 
     close_series = df_1m.set_index("timestamp")["close"].sort_index()
+    trend_hyst_on = args.trend_hyst_on if args.trend_hyst_on is not None else args.trend_hyst
+    trend_hyst_off = args.trend_hyst_off if args.trend_hyst_off is not None else args.trend_hyst
+
     if args.trend_filter == "none":
         trend_riskoff = pd.Series(False, index=close_series.index)
     else:
         if args.trend_timeframe == "same":
             ema_trend = close_series.ewm(span=args.trend_ema, adjust=False).mean()
             trend_riskoff = _trend_riskoff_with_hyst(
-                close_series, ema_trend, float(args.trend_hyst)
+                close_series, ema_trend, float(trend_hyst_on), float(trend_hyst_off)
             )
         else:
             rule = "1h" if args.trend_timeframe == "1h" else "1d"
@@ -128,7 +214,7 @@ def main() -> None:
             ema_resampled = close_resampled.ewm(span=args.trend_ema, adjust=False).mean()
             ema_trend = ema_resampled.reindex(close_series.index, method="ffill")
             trend_riskoff = _trend_riskoff_with_hyst(
-                close_series, ema_trend, float(args.trend_hyst)
+                close_series, ema_trend, float(trend_hyst_on), float(trend_hyst_off)
             )
 
     features = build_features(
@@ -190,14 +276,10 @@ def main() -> None:
 
     trend_riskoff = trend_riskoff.reindex(out_df["timestamp"]).fillna(False)
 
-    if args.riskoff_mode == "none":
-        gate = pd.Series(False, index=out_df["timestamp"])
-    elif args.riskoff_mode == "regime":
-        gate = regime_riskoff
-    elif args.riskoff_mode == "trend":
-        gate = trend_riskoff
-    else:
-        gate = regime_riskoff | trend_riskoff
+    use_regime = args.riskoff_mode in {"regime", "both"}
+    use_trend = args.riskoff_mode in {"trend", "both"}
+    gate_regime = regime_riskoff if use_regime else pd.Series(False, index=out_df["timestamp"])
+    gate_trend = trend_riskoff if use_trend else pd.Series(False, index=out_df["timestamp"])
 
     denom = out_df["sigma_ann_smooth"]
     weight_raw = args.target_vol / denom
@@ -212,25 +294,40 @@ def main() -> None:
     forced_zero = forced_zero | panic_mask
 
     weight = weight_raw.copy()
-    weight = weight.mask(gate.values, 0.0)
-    forced_zero = forced_zero | gate.values
+    if use_trend:
+        if args.trend_scale > 0:
+            weight = weight.where(~gate_trend.values, weight * args.trend_scale)
+        else:
+            weight = weight.mask(gate_trend.values, 0.0)
+            forced_zero = forced_zero | gate_trend.values
+    if use_regime:
+        weight = weight.mask(gate_regime.values, 0.0)
+        forced_zero = forced_zero | gate_regime.values
+
+    weight = _apply_ramp(weight, gate_trend, args.ramp_bars)
+    weight_pre_smooth = weight.copy()
+    weight = _apply_weight_controls(weight, args.max_dw_per_bar, args.min_rebalance_delta)
+    weight = weight.clip(lower=0.0, upper=args.w_max)
 
     if args.min_weight > 0:
         weight = weight.mask(~forced_zero, weight.clip(lower=args.min_weight, upper=args.w_max))
 
     out_df["weight"] = weight
+    out_df["weight_pre_smooth"] = weight_pre_smooth
     out_df["weight_raw"] = weight_raw
     out_df["panic_triggered"] = panic_mask.to_numpy()
     out_df["sigma_ann_raw"] = out_df["sigma_ann"]
     out_df["close"] = close_series.reindex(out_df["timestamp"]).to_numpy()
     out_df["trend_riskoff"] = trend_riskoff.to_numpy()
     out_df["regime_riskoff"] = regime_riskoff.to_numpy()
+    gate = gate_regime | gate_trend
     out_df["gate"] = gate.to_numpy()
     out_df = out_df[
         [
             "timestamp",
             "close",
             "weight",
+            "weight_pre_smooth",
             "weight_raw",
             "yhat",
             "sigma_ann_raw",

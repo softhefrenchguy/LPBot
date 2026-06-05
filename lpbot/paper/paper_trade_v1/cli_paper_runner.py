@@ -345,6 +345,13 @@ def update_exposure(
     trend_filter: str,
     trend_timeframe: str,
     trend_ema: int,
+    trend_hyst: float,
+    trend_hyst_on: float | None,
+    trend_hyst_off: float | None,
+    trend_scale: float,
+    max_dw_per_bar: float,
+    min_rebalance_delta: float,
+    ramp_bars: int,
     out_csv: str,
 ) -> None:
     cmd = [
@@ -373,9 +380,23 @@ def update_exposure(
         trend_timeframe,
         "--trend-ema",
         str(trend_ema),
+        "--trend-hyst",
+        str(trend_hyst),
+        "--trend-scale",
+        str(trend_scale),
+        "--max-dw-per-bar",
+        str(max_dw_per_bar),
+        "--min-rebalance-delta",
+        str(min_rebalance_delta),
+        "--ramp-bars",
+        str(ramp_bars),
         "--out",
         out_csv,
     ]
+    if trend_hyst_on is not None:
+        cmd.extend(["--trend-hyst-on", str(trend_hyst_on)])
+    if trend_hyst_off is not None:
+        cmd.extend(["--trend-hyst-off", str(trend_hyst_off)])
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
 
 
@@ -385,6 +406,7 @@ def append_paper_log(
     volume_csv: str,
     bar_minutes: int,
     fee_tier: float,
+    trade_cost_bps: float,
     pool_tvl_usd: float,
     in_range_frac: float,
     range_sigma: float,
@@ -414,6 +436,8 @@ def append_paper_log(
         str(bar_minutes),
         "--fee-tier",
         str(fee_tier),
+        "--trade-cost-bps",
+        str(trade_cost_bps),
         "--pool-tvl-usd",
         str(pool_tvl_usd),
         "--in-range-frac",
@@ -478,8 +502,16 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--trend-filter", default="ema")
     p.add_argument("--trend-timeframe", default="1h")
     p.add_argument("--trend-ema", type=int, default=200)
+    p.add_argument("--trend-hyst", type=float, default=0.0)
+    p.add_argument("--trend-hyst-on", type=float, default=None)
+    p.add_argument("--trend-hyst-off", type=float, default=None)
+    p.add_argument("--trend-scale", type=float, default=0.0)
+    p.add_argument("--max-dw-per-bar", type=float, default=0.0)
+    p.add_argument("--min-rebalance-delta", type=float, default=0.0)
+    p.add_argument("--ramp-bars", type=int, default=0)
 
     p.add_argument("--fee-tier", type=float, default=0.003)
+    p.add_argument("--trade-cost-bps", type=float, default=0.0)
     p.add_argument("--pool-tvl-usd", type=float, default=20000000)
     p.add_argument("--in-range-frac", type=float, default=0.25)
     p.add_argument("--range-sigma", type=float, default=2.0)
@@ -545,6 +577,13 @@ def main() -> None:
         trend_filter=args.trend_filter,
         trend_timeframe=args.trend_timeframe,
         trend_ema=args.trend_ema,
+        trend_hyst=args.trend_hyst,
+        trend_hyst_on=args.trend_hyst_on,
+        trend_hyst_off=args.trend_hyst_off,
+        trend_scale=args.trend_scale,
+        max_dw_per_bar=args.max_dw_per_bar,
+        min_rebalance_delta=args.min_rebalance_delta,
+        ramp_bars=args.ramp_bars,
         out_csv=args.exposure_csv,
     )
 
@@ -555,6 +594,7 @@ def main() -> None:
         volume_csv=str(volume_csv),
         bar_minutes=args.bar_minutes,
         fee_tier=args.fee_tier,
+        trade_cost_bps=args.trade_cost_bps,
         pool_tvl_usd=args.pool_tvl_usd,
         in_range_frac=args.in_range_frac,
         range_sigma=args.range_sigma,

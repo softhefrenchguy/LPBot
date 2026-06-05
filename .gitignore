@@ -1,21 +1,50 @@
-# data and artifacts
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Local IDE / OS state
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Generated data, artifacts, models, logs
 data/
+artifacts/
 regimes/
 results/
 outputs/
+models/
+logs/
+ec2_backup/
+reminders/
 
-# csvs
+# Generated file types
 **/*.csv
+**/*.html
+**/*.jsonl
+*.joblib
+*.pkl
+*.pickle
 
-# python
-__pycache__/
-*.pyc
-.env
-.venv/
+# Keep documentation and examples trackable
+!.env.example
+!docs/**/*.md
 
-# notebooks
+# Notebooks are local research unless explicitly exported to docs
 *.ipynb
 
-# logs
+# Root scratch outputs
 download_log.txt
 download_err.txt
+v2_last2w.csv
+v2_last2w.html

@@ -54,6 +54,7 @@ def compute_paper_rows(
     vol_df: pd.DataFrame,
     bar_minutes: int,
     fee_tier: float,
+    trade_cost_bps: float = 0.0,
     pool_tvl_usd: float,
     in_range_frac: float,
     range_sigma: float,
@@ -117,6 +118,7 @@ def compute_paper_rows(
     gate_bool = merged["gate"].fillna(False).astype(bool)
     weight = pd.to_numeric(merged["weight"], errors="coerce").fillna(0.0)
     weight_raw = pd.to_numeric(merged.get("weight_raw"), errors="coerce")
+    weight_pre_smooth = pd.to_numeric(merged.get("weight_pre_smooth"), errors="coerce")
     sigma_ann_smooth = pd.to_numeric(merged["sigma_ann_smooth"], errors="coerce")
     sigma_ann_raw = pd.to_numeric(
         merged.get("sigma_ann_raw", merged.get("sigma_ann")), errors="coerce"
@@ -164,8 +166,10 @@ def compute_paper_rows(
     churn_r = -lp_weight_lag * churn_k * churn_intensity
 
     overlay_r = fee_r + il_r + churn_r
+    turnover = (weight - weight.shift(1)).abs().fillna(0.0)
+    trade_cost_r = -turnover * (float(trade_cost_bps) / 10_000.0)
     core_r = weight.shift(1) * r
-    combined_r = core_r + overlay_r
+    combined_r = core_r + overlay_r + trade_cost_r
 
     out = pd.DataFrame(
         {
@@ -174,6 +178,7 @@ def compute_paper_rows(
             "r": r,
             "gate": gate_bool,
             "weight": weight,
+            "weight_pre_smooth": weight_pre_smooth,
             "weight_raw": weight_raw,
             "trend_riskoff": trend_riskoff.astype(bool),
             "regime_riskoff": regime_riskoff.astype(bool),
@@ -189,6 +194,7 @@ def compute_paper_rows(
             "il_r": il_r,
             "churn_r": churn_r,
             "overlay_r": overlay_r,
+            "trade_cost_r": trade_cost_r,
             "core_r": core_r,
             "combined_r": combined_r,
         }
@@ -201,6 +207,7 @@ def compute_paper_rows(
             "r",
             "gate",
             "weight",
+            "weight_pre_smooth",
             "weight_raw",
             "trend_riskoff",
             "regime_riskoff",
@@ -216,6 +223,7 @@ def compute_paper_rows(
             "il_r",
             "churn_r",
             "overlay_r",
+            "trade_cost_r",
             "core_r",
             "combined_r",
         ]
