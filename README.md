@@ -29,7 +29,8 @@ Read these in order:
 2. [Script Inventory](docs/SCRIPT_INVENTORY.md)
 3. [Operations](docs/OPERATIONS.md)
 4. [Artifact Policy](docs/ARTIFACT_POLICY.md)
-5. [GitHub Setup](docs/GITHUB_SETUP.md)
+5. [Hetzner Runbook](docs/HETZNER_RUNBOOK.md)
+6. [GitHub Setup](docs/GITHUB_SETUP.md)
 
 ## Local Setup
 
