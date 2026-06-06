@@ -3,7 +3,17 @@
   "gross_cap": 0.8,
   "cost_mode": "weight_change",
   "cost_bps": 20,
+  "eth_ema": [
+    21,
+    55,
+    144
+  ],
   "eth_confirm_days": 3,
+  "btc_ema": [
+    15,
+    40,
+    120
+  ],
   "btc_confirm_days": 5,
   "vol_filter": true,
   "vol_lookback": 20,
@@ -18,15 +28,27 @@
   "transition_weak_threshold": 0.01,
   "transition_weak_multiplier": 0.6,
   "transition_scale_up_days": 5,
+  "asymmetric_sizing": true,
+  "conviction_high_threshold": 0.8,
+  "conviction_high_multiplier": 1.2,
+  "conviction_mid_threshold": 0.6,
+  "conviction_mid_multiplier": 1.0,
+  "conviction_low_threshold": 0.4,
+  "conviction_low_multiplier": 0.8,
+  "conviction_floor_multiplier": 0.6,
+  "gold_reserve": true,
+  "gold_symbol": "PAXG",
+  "gold_cap": 0.3,
   "validated_reference": {
     "period": "2019-2024",
     "cost_bps": 20,
     "cost_mode": "weight_change",
     "allocation_mode": "signal_weighted",
-    "sharpe": 1.528,
-    "cagr": 0.3282,
-    "max_dd": -0.1967,
-    "ann_vol": 0.1616,
-    "config": "vol_filter + transition_momentum"
+    "gross_cap": 0.8,
+    "config": "vol_filter + transition_momentum + BTC EMA 15/40/120 + asymmetric_sizing",
+    "sharpe": 1.626,
+    "cagr": 0.3524,
+    "max_dd": -0.1587,
+    "ann_vol": 0.1631
   }
 }

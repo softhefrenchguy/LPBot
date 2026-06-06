@@ -192,7 +192,7 @@ def _load_portfolio_config(path: Path) -> dict[str, object]:
     if not path.exists():
         return {}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
@@ -219,6 +219,21 @@ def _cfg_int(cfg: dict[str, object], key: str, default: int) -> int:
         return int(cfg.get(key, default))
     except Exception:
         return int(default)
+
+
+def _cfg_int_list(cfg: dict[str, object], key: str, default: list[int]) -> list[int]:
+    v = cfg.get(key, default)
+    if isinstance(v, list):
+        vals = v
+    elif isinstance(v, str):
+        vals = [x.strip() for x in v.replace("/", ",").split(",") if x.strip()]
+    else:
+        return list(default)
+    try:
+        out = [int(x) for x in vals]
+    except Exception:
+        return list(default)
+    return out if len(out) == len(default) else list(default)
 
 
 def _vol_filter_state(daily_close: pd.Series, cfg: dict[str, object]) -> dict[str, object]:
@@ -258,6 +273,70 @@ def _vol_filter_state(daily_close: pd.Series, cfg: dict[str, object]) -> dict[st
             "vol_percentile": pct,
             "vol_multiplier": float(mult),
             "rolling_vol_20d": latest_vol,
+        }
+    )
+    return out
+
+
+def _conviction_state(
+    price: float,
+    ema_mid: float,
+    ema_slow: float,
+    regime: str,
+    vol_regime: str,
+    cfg: dict[str, object],
+    enabled: bool,
+) -> dict[str, object]:
+    out = {
+        "conviction_score": np.nan,
+        "conviction_bucket": "OFF",
+        "conviction_multiplier": 1.0,
+        "conviction_gap_score": np.nan,
+        "conviction_regime_score": np.nan,
+        "conviction_vol_score": np.nan,
+    }
+    if not enabled:
+        return out
+    px = _safe_num(price)
+    mid = _safe_num(ema_mid)
+    slow = _safe_num(ema_slow)
+    if not (np.isfinite(px) and px > 0 and np.isfinite(mid) and np.isfinite(slow)):
+        return out
+    gap_pct = float((mid - slow) / px)
+    if gap_pct > 0.02:
+        f1 = 0.33
+    elif gap_pct > 0.01:
+        f1 = 0.20
+    else:
+        f1 = 0.10
+    reg = str(regime).upper()
+    f2 = 0.33 if reg == "BULL" else 0.17 if reg == "CHOP" else 0.0
+    vol = str(vol_regime).upper()
+    f3 = 0.33 if vol == "LOW" else 0.10 if vol == "HIGH" else 0.20
+    score = float(f1 + f2 + f3)
+    high_th = _cfg_float(cfg, "conviction_high_threshold", 0.80)
+    mid_th = _cfg_float(cfg, "conviction_mid_threshold", 0.60)
+    low_th = _cfg_float(cfg, "conviction_low_threshold", 0.40)
+    if score > high_th:
+        bucket = "HIGH"
+        mult = _cfg_float(cfg, "conviction_high_multiplier", 1.2)
+    elif score >= mid_th:
+        bucket = "MID"
+        mult = _cfg_float(cfg, "conviction_mid_multiplier", 1.0)
+    elif score >= low_th:
+        bucket = "LOW"
+        mult = _cfg_float(cfg, "conviction_low_multiplier", 0.8)
+    else:
+        bucket = "FLOOR"
+        mult = _cfg_float(cfg, "conviction_floor_multiplier", 0.6)
+    out.update(
+        {
+            "conviction_score": score,
+            "conviction_bucket": bucket,
+            "conviction_multiplier": float(mult),
+            "conviction_gap_score": f1,
+            "conviction_regime_score": f2,
+            "conviction_vol_score": f3,
         }
     )
     return out
@@ -421,6 +500,7 @@ def _send_discord_summary(webhook_url: str, summary: dict[str, object], timeout_
         f"Def contribution (scaled): {_fmt_num(def_w_scaled, 4)}",
         f"Vol regime: {summary.get('vol_regime', 'NA')} ({_fmt_pct(_safe_num(summary.get('vol_percentile', np.nan)), 0)} pctile)",
         f"Transition: {summary.get('transition_strength', 'NA')} x{_fmt_num(_safe_num(summary.get('transition_multiplier', np.nan)), 2)}",
+        f"ETH conviction: {summary.get('conviction_bucket', 'NA')} ({_fmt_num(_safe_num(summary.get('conviction_score', np.nan)), 2)} score)",
     ]
     off_gate_lines = [
         f"EMA21/55/144: {_fmt_num(_safe_num(summary.get('ema21', np.nan)), 2)} / {_fmt_num(_safe_num(summary.get('ema55', np.nan)), 2)} / {_fmt_num(_safe_num(summary.get('ema144', np.nan)), 2)}",
@@ -450,7 +530,7 @@ def _send_discord_summary(webhook_url: str, summary: dict[str, object], timeout_
     ]
     btc_signal_lines = [
         f"BTC: ${_fmt_num(_safe_num(summary.get('btc_price', np.nan)), 0)} ({_fmt_pct(_safe_num(summary.get('btc_24h_pct', np.nan)), 1)})",
-        f"EMA21/55/144: {_fmt_num(_safe_num(summary.get('btc_ema21', np.nan)), 2)} / {_fmt_num(_safe_num(summary.get('btc_ema55', np.nan)), 2)} / {_fmt_num(_safe_num(summary.get('btc_ema144', np.nan)), 2)}",
+        f"EMA15/40/120: {_fmt_num(_safe_num(summary.get('btc_ema15', summary.get('btc_ema21', np.nan))), 2)} / {_fmt_num(_safe_num(summary.get('btc_ema40', summary.get('btc_ema55', np.nan))), 2)} / {_fmt_num(_safe_num(summary.get('btc_ema120', summary.get('btc_ema144', np.nan))), 2)}",
         f"Stack aligned: {'YES' if bool(summary.get('btc_stack_aligned', False)) else 'NO'}",
         f"Days aligned: {summary.get('btc_stack_aligned_days', 'NA')}",
         f"Entry threshold met: {'YES' if bool(summary.get('btc_entry_threshold_met', False)) else 'NO'}",
@@ -459,6 +539,7 @@ def _send_discord_summary(webhook_url: str, summary: dict[str, object], timeout_
         f"Raw signal: {_fmt_num(_safe_num(summary.get('btc_off_weight_raw', np.nan)), 4)}",
         f"Scaled weight: {_fmt_num(_safe_num(summary.get('btc_combined_weight', np.nan)), 4)}",
         f"Transition: {summary.get('btc_transition_strength', 'NA')} x{_fmt_num(_safe_num(summary.get('btc_transition_multiplier', np.nan)), 2)}",
+        f"Conviction: {summary.get('btc_conviction_bucket', 'NA')} ({_fmt_num(_safe_num(summary.get('btc_conviction_score', np.nan)), 2)} score)",
     ]
     perf_lines = [
         f"Start: {paper_start} | days: {days_live}",
@@ -689,6 +770,18 @@ def _run() -> int:
     if portfolio_cfg:
         args.off_confirm_days = _cfg_int(portfolio_cfg, "eth_confirm_days", int(args.off_confirm_days))
         args.btc_confirm_days = _cfg_int(portfolio_cfg, "btc_confirm_days", int(args.btc_confirm_days))
+        eth_ema = _cfg_int_list(
+            portfolio_cfg,
+            "eth_ema",
+            [int(args.off_ema_fast), int(args.off_ema_mid), int(args.off_ema_slow)],
+        )
+        btc_ema = _cfg_int_list(
+            portfolio_cfg,
+            "btc_ema",
+            [int(args.btc_ema_fast), int(args.btc_ema_mid), int(args.btc_ema_slow)],
+        )
+        args.off_ema_fast, args.off_ema_mid, args.off_ema_slow = eth_ema
+        args.btc_ema_fast, args.btc_ema_mid, args.btc_ema_slow = btc_ema
 
     now = pd.Timestamp.now("UTC")
     out_dir = Path(args.out_dir)
@@ -713,6 +806,7 @@ def _run() -> int:
 
     vol_filter_enabled = _cfg_bool(portfolio_cfg, "vol_filter", False)
     transition_momentum_enabled = _cfg_bool(portfolio_cfg, "transition_momentum", False)
+    asymmetric_sizing_enabled = _cfg_bool(portfolio_cfg, "asymmetric_sizing", False)
     gross_cap = _cfg_float(portfolio_cfg, "gross_cap", 1.0)
 
     # Load inputs
@@ -1090,6 +1184,16 @@ def _run() -> int:
     eth_transition_multiplier = float(eth_transition.get("transition_multiplier", 1.0))
     off_scaled = float(off_w) * float(off_scale_map.get(current_regime, 0.0))
     off_scaled = off_scaled * vol_multiplier * eth_transition_multiplier
+    eth_conviction = _conviction_state(
+        price=eth_price,
+        ema_mid=ema55,
+        ema_slow=ema144,
+        regime=current_regime,
+        vol_regime=str(vol_state.get("vol_regime", "NA")),
+        cfg=portfolio_cfg,
+        enabled=asymmetric_sizing_enabled,
+    )
+    off_scaled = off_scaled * float(eth_conviction.get("conviction_multiplier", 1.0))
     def_scaled = (float(def_w) if np.isfinite(def_w) else 0.0) * float(def_scale_map.get(current_regime, 0.0))
     w_raw = off_scaled + def_scaled
     comb_w = float(min(gross_cap, max(0.0, w_raw)))
@@ -1274,7 +1378,18 @@ def _run() -> int:
             b_pos = 0
             b_days = 0
             b_states: list[int] = []
+            b_regime_by_day = pd.Series(dtype=object)
+            if len(regime) and args.regime_col in regime.columns:
+                brg = regime.copy()
+                brg["day"] = brg["timestamp"].dt.floor("D")
+                b_regime_by_day = brg.sort_values("day").drop_duplicates("day", keep="last").set_index("day")[args.regime_col].astype(str)
             for day in btc_close_s.index:
+                day_regime = str(b_regime_by_day.get(day, current_regime)) if len(b_regime_by_day) else str(current_regime)
+                if day_regime == "BEAR":
+                    b_pos = 0
+                    b_days = 0
+                    b_states.append(int(b_pos))
+                    continue
                 if b_pos == 1:
                     b_days += 1
                 else:
@@ -1346,6 +1461,16 @@ def _run() -> int:
         btc_transition["transition_strength"] = "OFF"
     btc_transition_multiplier = float(btc_transition.get("transition_multiplier", 1.0))
     btc_off_scaled = btc_off_scaled * vol_multiplier * btc_transition_multiplier
+    btc_conviction = _conviction_state(
+        price=btc_price,
+        ema_mid=btc_ema55,
+        ema_slow=btc_ema144,
+        regime=current_regime,
+        vol_regime=str(vol_state.get("vol_regime", "NA")),
+        cfg=portfolio_cfg,
+        enabled=asymmetric_sizing_enabled,
+    )
+    btc_off_scaled = btc_off_scaled * float(btc_conviction.get("conviction_multiplier", 1.0))
     btc_def_scaled = float(btc_def_w) * float(def_scale_map.get(current_regime, 0.0))
     btc_comb_w = float(min(gross_cap, max(0.0, btc_off_scaled + btc_def_scaled)))
 
@@ -1687,6 +1812,14 @@ def _run() -> int:
         f"x{_fmt_num(_safe_num(btc_transition.get('transition_multiplier', np.nan)), 2)}"
     )
     print(
+        f"Conviction: ETH={eth_conviction.get('conviction_bucket', 'NA')} "
+        f"({_fmt_num(_safe_num(eth_conviction.get('conviction_score', np.nan)), 2)}) "
+        f"x{_fmt_num(_safe_num(eth_conviction.get('conviction_multiplier', np.nan)), 2)} "
+        f"| BTC={btc_conviction.get('conviction_bucket', 'NA')} "
+        f"({_fmt_num(_safe_num(btc_conviction.get('conviction_score', np.nan)), 2)}) "
+        f"x{_fmt_num(_safe_num(btc_conviction.get('conviction_multiplier', np.nan)), 2)}"
+    )
+    print(
         f"Gold paper: {'IN' if gold_position_active else 'FLAT'} | gate_flat_bear={gold_flat_bear_gate} "
         f"| ema_gate={gold_entry_threshold_met} | cond={gold_condition_met} | px={_fmt_num(gold_price, 2)} "
         f"| entry={gold_entry_ts if pd.notna(gold_entry_ts) else 'NA'} | ret={_fmt_pct(gold_return_since_entry, 2)} "
@@ -1762,6 +1895,9 @@ def _run() -> int:
         "eth_24h_pct": eth_24h_pct,
         "btc_price": btc_price,
         "btc_24h_pct": btc_24h_pct,
+        "btc_ema15": btc_ema21,
+        "btc_ema40": btc_ema55,
+        "btc_ema120": btc_ema144,
         "btc_ema21": btc_ema21,
         "btc_ema55": btc_ema55,
         "btc_ema144": btc_ema144,
@@ -1849,6 +1985,19 @@ def _run() -> int:
         "btc_transition_multiplier": _safe_num(btc_transition.get("transition_multiplier", np.nan)),
         "btc_transition_return": _safe_num(btc_transition.get("transition_return", np.nan)),
         "btc_transition_flip_date": str(btc_transition.get("transition_flip_date", "")),
+        "asymmetric_sizing": bool(asymmetric_sizing_enabled),
+        "conviction_score": _safe_num(eth_conviction.get("conviction_score", np.nan)),
+        "conviction_bucket": str(eth_conviction.get("conviction_bucket", "NA")),
+        "conviction_multiplier": _safe_num(eth_conviction.get("conviction_multiplier", np.nan)),
+        "conviction_gap_score": _safe_num(eth_conviction.get("conviction_gap_score", np.nan)),
+        "conviction_regime_score": _safe_num(eth_conviction.get("conviction_regime_score", np.nan)),
+        "conviction_vol_score": _safe_num(eth_conviction.get("conviction_vol_score", np.nan)),
+        "btc_conviction_score": _safe_num(btc_conviction.get("conviction_score", np.nan)),
+        "btc_conviction_bucket": str(btc_conviction.get("conviction_bucket", "NA")),
+        "btc_conviction_multiplier": _safe_num(btc_conviction.get("conviction_multiplier", np.nan)),
+        "btc_conviction_gap_score": _safe_num(btc_conviction.get("conviction_gap_score", np.nan)),
+        "btc_conviction_regime_score": _safe_num(btc_conviction.get("conviction_regime_score", np.nan)),
+        "btc_conviction_vol_score": _safe_num(btc_conviction.get("conviction_vol_score", np.nan)),
         "portfolio_config": args.portfolio_config,
         "combined_weight_le_1": bool(np.isfinite(comb_w) and comb_w <= gross_cap + 1e-9),
         "cap_bind_today": cap_bind_today,
@@ -1902,6 +2051,9 @@ def _run() -> int:
         "regime": current_regime,
         "btc_price": btc_price,
         "btc_24h_pct": btc_24h_pct,
+        "btc_ema15": btc_ema21,
+        "btc_ema40": btc_ema55,
+        "btc_ema120": btc_ema144,
         "btc_ema21": btc_ema21,
         "btc_ema55": btc_ema55,
         "btc_ema144": btc_ema144,
@@ -1915,6 +2067,9 @@ def _run() -> int:
         "vol_percentile": _safe_num(vol_state.get("vol_percentile", np.nan)),
         "transition_strength": str(btc_transition.get("transition_strength", "NA")),
         "transition_multiplier": _safe_num(btc_transition.get("transition_multiplier", np.nan)),
+        "btc_conviction_score": _safe_num(btc_conviction.get("conviction_score", np.nan)),
+        "btc_conviction_bucket": str(btc_conviction.get("conviction_bucket", "NA")),
+        "btc_conviction_multiplier": _safe_num(btc_conviction.get("conviction_multiplier", np.nan)),
         "btc_off_entry_ts": str(btc_off_entry_ts) if pd.notna(btc_off_entry_ts) else "",
         "btc_off_days_held": btc_off_days_held,
         "btc_off_hold_return": btc_off_hold_ret,
@@ -1996,6 +2151,12 @@ def _run() -> int:
             "transition_multiplier": out_row["transition_multiplier"],
             "btc_transition_strength": out_row["btc_transition_strength"],
             "btc_transition_multiplier": out_row["btc_transition_multiplier"],
+            "conviction_score": out_row["conviction_score"],
+            "conviction_bucket": out_row["conviction_bucket"],
+            "conviction_multiplier": out_row["conviction_multiplier"],
+            "btc_conviction_score": out_row["btc_conviction_score"],
+            "btc_conviction_bucket": out_row["btc_conviction_bucket"],
+            "btc_conviction_multiplier": out_row["btc_conviction_multiplier"],
             "cum_strategy_ret": cum_strategy_ret,
             "cum_spot_ret": cum_spot_ret,
             "excess": excess,
@@ -2058,6 +2219,9 @@ def _run() -> int:
             "off_last_days_held": int(_safe_num(last_closed.get("days_held", np.nan))) if off_last_trade_closed and np.isfinite(_safe_num(last_closed.get("days_held", np.nan))) else "NA",
             "off_last_return_pct": _safe_num(last_closed.get("return_pct", np.nan)) if off_last_trade_closed else np.nan,
             "btc_regime": current_regime,
+            "btc_ema15": btc_ema21,
+            "btc_ema40": btc_ema55,
+            "btc_ema120": btc_ema144,
             "btc_ema21": btc_ema21,
             "btc_ema55": btc_ema55,
             "btc_ema144": btc_ema144,

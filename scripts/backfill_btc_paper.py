@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
@@ -32,6 +33,56 @@ def _read_daily_close_csv(path: Path) -> pd.DataFrame:
     return out
 
 
+def _load_config(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _cfg_int_list(cfg: dict[str, object], key: str, default: list[int]) -> list[int]:
+    v = cfg.get(key, default)
+    if isinstance(v, list):
+        vals = v
+    elif isinstance(v, str):
+        vals = [x.strip() for x in v.replace("/", ",").split(",") if x.strip()]
+    else:
+        return list(default)
+    try:
+        out = [int(x) for x in vals]
+    except Exception:
+        return list(default)
+    return out if len(out) == len(default) else list(default)
+
+
+def _conviction_multiplier(price: float, ema_mid: float, ema_slow: float, regime: str) -> tuple[float, str, float]:
+    if not np.isfinite(price) or price <= 0 or not np.isfinite(ema_mid) or not np.isfinite(ema_slow):
+        return 1.0, "NA", float("nan")
+    gap_pct = (ema_mid - ema_slow) / price
+    if gap_pct > 0.02:
+        f1 = 0.33
+    elif gap_pct > 0.01:
+        f1 = 0.20
+    else:
+        f1 = 0.10
+    reg = str(regime).upper()
+    f2 = 0.33 if reg == "BULL" else 0.17 if reg == "CHOP" else 0.0
+    # Backfill does not reconstruct ETH vol percentile reliably; use NORMAL,
+    # matching the live default when the vol filter is not classifying extremes.
+    f3 = 0.20
+    score = float(f1 + f2 + f3)
+    if score > 0.80:
+        return 1.2, "HIGH", score
+    if score >= 0.60:
+        return 1.0, "MID", score
+    if score >= 0.40:
+        return 0.8, "LOW", score
+    return 0.6, "FLOOR", score
+
+
 def _build_btc_backfill(
     *,
     btc_daily_csv: Path,
@@ -39,6 +90,8 @@ def _build_btc_backfill(
     eth_log_csv: Path,
     start_date: pd.Timestamp,
     end_date: pd.Timestamp,
+    btc_ema: list[int],
+    asymmetric_sizing: bool,
 ) -> tuple[pd.DataFrame, list[str], list[str], list[str], list[dict[str, object]]]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -66,12 +119,12 @@ def _build_btc_backfill(
     bday = btc_daily["timestamp"].dt.floor("D")
     btc_close_s = pd.Series(pd.to_numeric(btc_daily["close"], errors="coerce").to_numpy(dtype=float), index=bday)
     btc_close_s = btc_close_s[~btc_close_s.index.duplicated(keep="last")].dropna().sort_index()
-    btc_close_s = btc_close_s.reindex(regime_s.index).ffill()
+    btc_close_s = btc_close_s.reindex(btc_close_s.index.union(regime_s.index)).sort_index().ffill().reindex(regime_s.index)
 
     # BTC EMA/offensive.
-    b_fast = btc_close_s.ewm(span=21, adjust=False).mean()
-    b_mid = btc_close_s.ewm(span=55, adjust=False).mean()
-    b_slow = btc_close_s.ewm(span=144, adjust=False).mean()
+    b_fast = btc_close_s.ewm(span=int(btc_ema[0]), adjust=False).mean()
+    b_mid = btc_close_s.ewm(span=int(btc_ema[1]), adjust=False).mean()
+    b_slow = btc_close_s.ewm(span=int(btc_ema[2]), adjust=False).mean()
     b_stack = (b_fast > b_mid) & (b_mid > b_slow)
     b_entry = (b_stack.rolling(5, min_periods=5).min() == 1).fillna(False)
     b_exit = ((~b_stack).rolling(3, min_periods=3).min() == 1).fillna(False)
@@ -84,11 +137,11 @@ def _build_btc_backfill(
     entry_day: pd.Timestamp | None = None
     for day in regime_s.index:
         if pos == 0:
-            if bool(b_entry.loc[day]):
+            if str(regime_s.loc[day]) != "BEAR" and bool(b_entry.loc[day]):
                 pos = 1
                 entry_day = day
         else:
-            if bool(b_exit.loc[day]):
+            if str(regime_s.loc[day]) == "BEAR" or bool(b_exit.loc[day]):
                 pos = 0
                 if entry_day is not None and np.isfinite(btc_close_s.loc[entry_day]) and np.isfinite(btc_close_s.loc[day]):
                     r = btc_close_s.loc[day] / btc_close_s.loc[entry_day] - 1.0
@@ -123,7 +176,23 @@ def _build_btc_backfill(
     def_scale = {"BULL": 0.0, "CHOP": 0.3, "BEAR": 0.8}
     reg_scale_off = regime_s.map(off_scale).fillna(0.0)
     reg_scale_def = regime_s.map(def_scale).fillna(0.0)
-    b_off_scaled = b_off_raw * reg_scale_off
+    conv_mult_vals: list[float] = []
+    conv_bucket_vals: list[str] = []
+    conv_score_vals: list[float] = []
+    for day in regime_s.index:
+        mult, bucket, score = _conviction_multiplier(
+            float(btc_close_s.loc[day]),
+            float(b_mid.loc[day]),
+            float(b_slow.loc[day]),
+            str(regime_s.loc[day]),
+        )
+        conv_mult_vals.append(mult if asymmetric_sizing else 1.0)
+        conv_bucket_vals.append(bucket if asymmetric_sizing else "OFF")
+        conv_score_vals.append(score if asymmetric_sizing else np.nan)
+    conv_mult_s = pd.Series(conv_mult_vals, index=regime_s.index, dtype=float)
+    conv_bucket_s = pd.Series(conv_bucket_vals, index=regime_s.index, dtype=object)
+    conv_score_s = pd.Series(conv_score_vals, index=regime_s.index, dtype=float)
+    b_off_scaled = b_off_raw * reg_scale_off * conv_mult_s
     b_def_scaled = btc_def_raw * reg_scale_def
     b_weight = (b_off_scaled + b_def_scaled).clip(0.0, 1.0)
 
@@ -167,7 +236,7 @@ def _build_btc_backfill(
         # Check 2
         if str(regime_s.loc[day]) == "BEAR" and abs(float(b_weight.loc[day])) > 1e-9:
             errors.append(f"{day.date()} weight consistency: BEAR but scaled_weight={b_weight.loc[day]:.4f}")
-        if entry_met and float(b_weight.loc[day]) <= 1e-9:
+        if entry_met and str(regime_s.loc[day]) != "BEAR" and float(b_weight.loc[day]) <= 1e-9:
             errors.append(f"{day.date()} weight consistency: entry met but scaled_weight=0")
         # Check 3
         if abs(w_exec) <= 1e-12 and abs(b_ret_d) > 1e-12:
@@ -192,6 +261,9 @@ def _build_btc_backfill(
                 "eth_cum_spot_ret": float(eth_spot_cum.loc[day]),
                 "btc_price": float(btc_close_s.loc[day]),
                 "btc_regime": str(regime_s.loc[day]),
+                "btc_ema15": float(b_fast.loc[day]),
+                "btc_ema40": float(b_mid.loc[day]),
+                "btc_ema120": float(b_slow.loc[day]),
                 "btc_ema21": float(b_fast.loc[day]),
                 "btc_ema55": float(b_mid.loc[day]),
                 "btc_ema144": float(b_slow.loc[day]),
@@ -201,6 +273,9 @@ def _build_btc_backfill(
                 "btc_funding_z": float(btc_funding_z_s.loc[day]) if day in btc_funding_z_s.index else np.nan,
                 "btc_raw_signal": float(b_off_raw.loc[day]),
                 "btc_scaled_weight": float(b_weight.loc[day]),
+                "btc_conviction_score": float(conv_score_s.loc[day]),
+                "btc_conviction_bucket": str(conv_bucket_s.loc[day]),
+                "btc_conviction_multiplier": float(conv_mult_s.loc[day]),
                 "btc_daily_return": b_ret_d,
                 "btc_cumulative_return": float(btc_cum.loc[day]),
                 "btc_cum_spot_ret": float(btc_spot_cum.loc[day]),
@@ -215,6 +290,7 @@ def _build_btc_backfill(
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Backfill BTC paper sleeve and print historical daily summaries.")
+    p.add_argument("--portfolio-config", default="config/portfolio_config.json")
     p.add_argument("--start-date", default="2026-03-21")
     p.add_argument("--end-date", default="")
     p.add_argument("--btc-daily-csv", default="data/btc_daily.csv")
@@ -227,6 +303,11 @@ def main() -> int:
 
     start_date = pd.Timestamp(args.start_date, tz="UTC").floor("D")
     end_date = pd.Timestamp.now(tz="UTC").floor("D") if not args.end_date else pd.Timestamp(args.end_date, tz="UTC").floor("D")
+    cfg = _load_config(Path(args.portfolio_config))
+    if not cfg:
+        cfg = _load_config(Path("artifacts/backtest/portfolio_config.json"))
+    btc_ema = _cfg_int_list(cfg, "btc_ema", [15, 40, 120])
+    asymmetric_sizing = bool(str(cfg.get("asymmetric_sizing", True)).strip().lower() in {"1", "true", "yes", "on"})
 
     df, errors, warnings, transitions, trades = _build_btc_backfill(
         btc_daily_csv=Path(args.btc_daily_csv),
@@ -234,6 +315,8 @@ def main() -> int:
         eth_log_csv=Path(args.eth_log_csv),
         start_date=start_date,
         end_date=end_date,
+        btc_ema=btc_ema,
+        asymmetric_sizing=asymmetric_sizing,
     )
 
     out_daily = Path(args.out_daily_csv)
@@ -251,6 +334,9 @@ def main() -> int:
             "regime": df["btc_regime"],
             "btc_price": df["btc_price"],
             "btc_24h_pct": pd.Series(df["btc_price"]).pct_change().fillna(0.0).values,
+            "btc_ema15": df["btc_ema15"],
+            "btc_ema40": df["btc_ema40"],
+            "btc_ema120": df["btc_ema120"],
             "btc_ema21": df["btc_ema21"],
             "btc_ema55": df["btc_ema55"],
             "btc_ema144": df["btc_ema144"],
@@ -260,6 +346,9 @@ def main() -> int:
             "btc_funding_z": df["btc_funding_z"],
             "btc_position": (df["btc_scaled_weight"] > 0).astype(bool),
             "btc_combined_weight": df["btc_scaled_weight"],
+            "btc_conviction_score": df["btc_conviction_score"],
+            "btc_conviction_bucket": df["btc_conviction_bucket"],
+            "btc_conviction_multiplier": df["btc_conviction_multiplier"],
             "btc_off_entry_ts": "",
             "btc_off_days_held": np.nan,
             "btc_off_hold_return": np.nan,
@@ -280,9 +369,10 @@ def main() -> int:
                 f"  Weight: {r['eth_weight']:.4f}",
                 f"  Strategy day: {r['eth_strategy_day_ret']*100:.2f}%",
                 f"BTC:  ${r['btc_price']:.0f} | Regime: {r['btc_regime']}",
-                f"  EMA21/55/144: {r['btc_ema21']:.2f} / {r['btc_ema55']:.2f} / {r['btc_ema144']:.2f}",
+                f"  EMA{btc_ema[0]}/{btc_ema[1]}/{btc_ema[2]}: {r['btc_ema15']:.2f} / {r['btc_ema40']:.2f} / {r['btc_ema120']:.2f}",
                 f"  Stack aligned: {'YES' if r['btc_stack_aligned'] else 'NO'} | Days: {int(r['btc_days_aligned'])}",
                 f"  Weight: {r['btc_scaled_weight']:.4f} | Trade: {'LONG' if r['btc_scaled_weight']>0 else 'FLAT'}",
+                f"  Conviction: {r['btc_conviction_bucket']} ({r['btc_conviction_score']:.2f})",
                 f"  Funding z: {r['btc_funding_z']:.3f}" if np.isfinite(r["btc_funding_z"]) else "  Funding z: n/a",
                 "Combined:",
                 f"  ETH strategy day: {r['eth_strategy_day_ret']*100:.2f}%",
