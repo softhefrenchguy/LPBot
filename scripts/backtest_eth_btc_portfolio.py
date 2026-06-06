@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -201,6 +203,241 @@ def _intraday_timing_frame(path: Path) -> pd.DataFrame:
     return out
 
 
+def _parse_ema_spans(value: str) -> tuple[int, int, int]:
+    parts = [p.strip() for p in str(value).replace("/", ",").split(",") if p.strip()]
+    if len(parts) != 3:
+        raise argparse.ArgumentTypeError("EMA spans must be fast,mid,slow, for example 21,55,144")
+    spans = tuple(int(p) for p in parts)
+    if spans[0] <= 0 or spans[1] <= spans[0] or spans[2] <= spans[1]:
+        raise argparse.ArgumentTypeError("EMA spans must be positive and increasing")
+    return spans  # type: ignore[return-value]
+
+
+def _signal_context(symbol: str, start: str, end: str, ema_spans: tuple[int, int, int]) -> pd.DataFrame:
+    d = _download_binance_daily(symbol=symbol, start=start, end=end)
+    if d.empty:
+        raise RuntimeError(f"No data downloaded for {symbol}")
+    d["day"] = d["timestamp"].dt.floor("D")
+    d = classify_regime_v2_on_btc(d)
+    e1, e2, e3 = ema_spans
+    d["ema_fast"] = d["close"].ewm(span=e1, adjust=False).mean()
+    d["ema_mid"] = d["close"].ewm(span=e2, adjust=False).mean()
+    d["ema_slow"] = d["close"].ewm(span=e3, adjust=False).mean()
+    d["stack_aligned"] = (d["ema_fast"] > d["ema_mid"]) & (d["ema_mid"] > d["ema_slow"])
+    return d[["day", "stack_aligned", "regime_v2"]].copy()
+
+
+def _cross_confirm_entry(
+    base_entry: pd.Series,
+    secondary_ok: pd.Series,
+    variant: str,
+    max_delay_days: int = 5,
+) -> tuple[pd.Series, dict[str, float]]:
+    variant = str(variant).lower()
+    if variant in {"", "off", "none"}:
+        return base_entry.astype(bool), {"trades_removed": 0, "trades_delayed": 0}
+    base = base_entry.fillna(False).astype(bool).to_numpy()
+    ok = secondary_ok.fillna(False).astype(bool).to_numpy()
+    out = np.zeros(len(base), dtype=bool)
+    removed = 0
+    delayed = 0
+    pending = False
+    pending_age = 0
+    pending_i = -1
+    for i in range(len(base)):
+        if not pending and base[i]:
+            if ok[i]:
+                out[i] = True
+            elif variant == "strict":
+                removed += 1
+            else:
+                pending = True
+                pending_age = 0
+                pending_i = i
+        elif pending:
+            pending_age += 1
+            if ok[i]:
+                out[i] = True
+                delayed += 1
+                pending = False
+            elif pending_age >= max_delay_days:
+                out[i] = True
+                delayed += 1
+                pending = False
+        if out[i]:
+            pending = False
+    if pending:
+        removed += 1
+    return pd.Series(out, index=base_entry.index), {"trades_removed": removed, "trades_delayed": delayed}
+
+
+def _fmt_pct(v: float) -> str:
+    return f"{float(v) * 100:.2f}%"
+
+
+def _run_child(args: argparse.Namespace, name: str, extra: list[str]) -> dict[str, Any]:
+    out_dir = Path("artifacts/backtest/improvement_tests")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    summary = out_dir / f"{name}_summary.csv"
+    daily = out_dir / f"{name}_daily.csv"
+    cmd = [
+        sys.executable,
+        str(Path(__file__)),
+        "--start",
+        str(args.start),
+        "--end",
+        str(args.end),
+        "--eth-symbol",
+        str(args.eth_symbol),
+        "--btc-symbol",
+        str(args.btc_symbol),
+        "--cost-bps",
+        "20",
+        "--cost-mode",
+        "weight_change",
+        "--allocation-mode",
+        "signal_weighted",
+        "--gross-cap",
+        "0.8",
+        "--vol-filter",
+        "--transition-momentum",
+        "--eth-defensive-csv",
+        str(args.eth_defensive_csv),
+        "--eth-perp-csv",
+        str(args.eth_perp_csv),
+        "--out-summary-csv",
+        str(summary),
+        "--out-daily-csv",
+        str(daily),
+    ] + extra
+    proc = subprocess.run(cmd, cwd=Path(__file__).resolve().parents[1], text=True, capture_output=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"{name} failed\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
+    row = pd.read_csv(summary).iloc[0].to_dict()
+    row["name"] = name
+    row["summary_csv"] = str(summary)
+    row["daily_csv"] = str(daily)
+    return row
+
+
+def run_round2_suite(args: argparse.Namespace) -> int:
+    out_dir = Path("artifacts/backtest/improvement_tests")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    cases: list[tuple[str, list[str], str]] = [
+        ("vol_transition", [], "Vol+Transition baseline"),
+    ]
+
+    ema_defs = [
+        ("ema_10_30_90", ["--eth-ema", "10,30,90", "--btc-ema", "10,30,90"], "10/30/90"),
+        ("ema_15_40_120", ["--eth-ema", "15,40,120", "--btc-ema", "15,40,120"], "15/40/120"),
+        ("ema_21_55_144", ["--eth-ema", "21,55,144", "--btc-ema", "21,55,144"], "21/55/144"),
+        ("ema_25_65_150", ["--eth-ema", "25,65,150", "--btc-ema", "25,65,150"], "25/65/150"),
+        ("ema_30_80_200", ["--eth-ema", "30,80,200", "--btc-ema", "30,80,200"], "30/80/200"),
+        ("ema_13_34_89", ["--eth-ema", "13,34,89", "--btc-ema", "13,34,89"], "13/34/89"),
+        ("ema_20_50_100", ["--eth-ema", "20,50,100", "--btc-ema", "20,50,100"], "20/50/100"),
+        (
+            "ema_asset_specific_h",
+            ["--eth-ema", "21,55,144", "--btc-ema", "15,40,120"],
+            "ETH 21/55/144 + BTC 15/40/120",
+        ),
+    ]
+    for name, extra, label in ema_defs:
+        cases.append((name, extra, label))
+    cases.extend(
+        [
+            ("cross_confirm_strict", ["--cross-confirm", "strict"], "Cross-confirm strict"),
+            ("cross_confirm_loose", ["--cross-confirm", "loose"], "Cross-confirm loose"),
+            ("cross_confirm_one_way", ["--cross-confirm", "one-way"], "Cross-confirm one-way"),
+            ("dd_aware_gradual", ["--dd-aware", "gradual"], "DD-aware gradual"),
+            ("dd_aware_binary", ["--dd-aware", "binary"], "DD-aware binary"),
+            ("asymmetric_sizing", ["--asymmetric-sizing"], "Asymmetric sizing"),
+        ]
+    )
+
+    rows: list[dict[str, Any]] = []
+    for name, extra, label in cases:
+        row = _run_child(args, name, extra)
+        row["configuration"] = label
+        rows.append(row)
+
+    all_df = pd.DataFrame(rows)
+    ema_df = all_df[all_df["name"].astype(str).str.startswith("ema_")].copy()
+    ema_df = ema_df.sort_values("combined_sharpe", ascending=False)
+    ema_df.to_csv(out_dir / "ema_grid_summary.csv", index=False)
+
+    cross_df = all_df[all_df["name"].astype(str).str.startswith("cross_confirm_")].copy()
+    cross_df.to_csv(out_dir / "cross_confirm_summary.csv", index=False)
+
+    dd_df = all_df[all_df["name"].astype(str).str.startswith("dd_aware_")].copy()
+    dd_df.to_csv(out_dir / "dd_aware_summary.csv", index=False)
+
+    asym_df = all_df[all_df["name"].astype(str).eq("asymmetric_sizing")].copy()
+    asym_df.to_csv(out_dir / "asymmetric_sizing_summary.csv", index=False)
+
+    final_cols = [
+        "configuration",
+        "combined_sharpe",
+        "combined_max_dd",
+        "combined_cagr",
+        "combined_ann_vol",
+        "eth_trades",
+        "btc_trades",
+        "eth_cross_trades_removed",
+        "btc_cross_trades_removed",
+        "eth_cross_trades_delayed",
+        "btc_cross_trades_delayed",
+    ]
+    for c in final_cols:
+        if c not in all_df.columns:
+            all_df[c] = np.nan
+    all_df[final_cols].to_csv(out_dir / "round2_full_comparison.csv", index=False)
+
+    baseline = all_df[all_df["name"].eq("vol_transition")].iloc[0]
+    best = all_df.sort_values("combined_sharpe", ascending=False).iloc[0]
+    print("========================================================")
+    print("ROUND 2 IMPROVEMENT RESULTS")
+    print("Baseline: vol_filter + transition_momentum")
+    print("========================================================")
+    print(f"{'Configuration':34s} {'Sharpe':>7s} {'MaxDD':>9s} {'CAGR':>8s}")
+    print("-" * 62)
+    wanted = [
+        "vol_transition",
+        ema_df.iloc[0]["name"] if not ema_df.empty else "",
+        "cross_confirm_strict",
+        "cross_confirm_loose",
+        "dd_aware_gradual",
+        "dd_aware_binary",
+        "asymmetric_sizing",
+    ]
+    printed = set()
+    for name in wanted:
+        if not name or name in printed:
+            continue
+        r = all_df[all_df["name"].eq(name)]
+        if r.empty:
+            continue
+        rr = r.iloc[0]
+        label = str(rr["configuration"])
+        if name == str(ema_df.iloc[0]["name"]):
+            label = "+ EMA best combo"
+        print(f"{label[:34]:34s} {rr['combined_sharpe']:7.3f} {_fmt_pct(rr['combined_max_dd']):>9s} {_fmt_pct(rr['combined_cagr']):>8s}")
+        printed.add(name)
+    print("-" * 62)
+    print(f"{'Best combination of all:':34s} {best['combined_sharpe']:7.3f} {_fmt_pct(best['combined_max_dd']):>9s} {_fmt_pct(best['combined_cagr']):>8s}")
+    print("-" * 62)
+    print("EMA grid full ranking:")
+    for i, (_, r) in enumerate(ema_df.iterrows(), start=1):
+        print(f"  Rank {i}: {r['configuration']}  Sharpe {r['combined_sharpe']:.3f}")
+    print("========================================================")
+    print(f"Saved: {out_dir / 'ema_grid_summary.csv'}")
+    print(f"Saved: {out_dir / 'cross_confirm_summary.csv'}")
+    print(f"Saved: {out_dir / 'dd_aware_summary.csv'}")
+    print(f"Saved: {out_dir / 'asymmetric_sizing_summary.csv'}")
+    print(f"Saved: {out_dir / 'round2_full_comparison.csv'}")
+    return 0
+
+
 def run_sleeve(
     symbol: str,
     confirm_days: int,
@@ -214,6 +451,9 @@ def run_sleeve(
     start: str,
     end: str,
     out_price_csv: Path,
+    ema_spans: tuple[int, int, int] = (21, 55, 144),
+    secondary_confirm: pd.DataFrame | None = None,
+    cross_confirm_variant: str = "off",
 ) -> pd.DataFrame:
     d = _download_binance_daily(symbol=symbol, start=start, end=end)
     if d.empty:
@@ -224,12 +464,29 @@ def run_sleeve(
     d["day"] = d["timestamp"].dt.floor("D")
     d = classify_regime_v2_on_btc(d)
 
-    d["ema21"] = d["close"].ewm(span=21, adjust=False).mean()
-    d["ema55"] = d["close"].ewm(span=55, adjust=False).mean()
-    d["ema144"] = d["close"].ewm(span=144, adjust=False).mean()
+    e1, e2, e3 = ema_spans
+    d["ema21"] = d["close"].ewm(span=e1, adjust=False).mean()
+    d["ema55"] = d["close"].ewm(span=e2, adjust=False).mean()
+    d["ema144"] = d["close"].ewm(span=e3, adjust=False).mean()
+    d["ema_fast_span"] = e1
+    d["ema_mid_span"] = e2
+    d["ema_slow_span"] = e3
     d["stack_aligned"] = (d["ema21"] > d["ema55"]) & (d["ema55"] > d["ema144"])
     conf = max(1, int(confirm_days))
-    entry = (d["stack_aligned"].rolling(conf, min_periods=conf).min() == 1).fillna(False)
+    entry_base = (d["stack_aligned"].rolling(conf, min_periods=conf).min() == 1).fillna(False)
+    d["cross_trades_removed"] = 0
+    d["cross_trades_delayed"] = 0
+    if secondary_confirm is not None and str(cross_confirm_variant).lower() not in {"", "off", "none"}:
+        sec = secondary_confirm.rename(
+            columns={"stack_aligned": "secondary_stack_aligned", "regime_v2": "secondary_regime"}
+        )[["day", "secondary_stack_aligned", "secondary_regime"]].copy()
+        d = d.merge(sec, on="day", how="left")
+        secondary_ok = d["secondary_stack_aligned"].fillna(False).astype(bool) & ~d["secondary_regime"].astype(str).eq("BEAR")
+        entry, cross_stats = _cross_confirm_entry(entry_base, secondary_ok, str(cross_confirm_variant))
+        d["cross_trades_removed"] = int(cross_stats["trades_removed"])
+        d["cross_trades_delayed"] = int(cross_stats["trades_delayed"])
+    else:
+        entry = entry_base
     exit_ = ((~d["stack_aligned"]).rolling(conf, min_periods=conf).min() == 1).fillna(False)
 
     rv = d["close"].pct_change().rolling(20, min_periods=20).std(ddof=0) * np.sqrt(252.0)
@@ -292,6 +549,11 @@ def run_sleeve(
     d["transition_class"] = transition_class
     d["transition_multiplier"] = transition_mult
     d["off_raw_signal"] = np.where(d["off_active"] == 1, d["vol_scalar"], 0.0)
+    d["conviction"] = 0.0
+    gap_pct = ((d["ema55"] - d["ema144"]) / d["close"].replace(0.0, np.nan)).replace([np.inf, -np.inf], np.nan)
+    d["conviction_gap_score"] = np.select([gap_pct > 0.02, gap_pct >= 0.01], [0.33, 0.20], default=0.10)
+    d["conviction_regime_score"] = d["regime_v2"].map({"BULL": 0.33, "CHOP": 0.17, "BEAR": 0.0}).fillna(0.0)
+    d["conviction"] = d["conviction_gap_score"] + d["conviction_regime_score"]
 
     off_scale_map = {"BULL": 0.8, "CHOP": 0.4, "BEAR": 0.0}
     def_scale_map = {"BULL": 0.0, "CHOP": 0.4, "BEAR": 1.0}
@@ -346,6 +608,8 @@ def main() -> int:
     ap.add_argument("--btc-symbol", default="BTCUSDC")
     ap.add_argument("--eth-confirm-days", type=int, default=3)
     ap.add_argument("--btc-confirm-days", type=int, default=5)
+    ap.add_argument("--eth-ema", type=_parse_ema_spans, default=(21, 55, 144))
+    ap.add_argument("--btc-ema", type=_parse_ema_spans, default=(21, 55, 144))
     ap.add_argument("--cost-bps", type=float, default=10.0)
     ap.add_argument("--cost-mode", choices=["entry_exit", "weight_change"], default="weight_change")
     ap.add_argument("--allocation-mode", choices=["fixed", "signal_weighted"], default="fixed")
@@ -357,6 +621,11 @@ def main() -> int:
     ap.add_argument("--stop-loss-pct", type=float, default=0.08)
     ap.add_argument("--vol-filter", action="store_true")
     ap.add_argument("--transition-momentum", action="store_true")
+    ap.add_argument("--cross-confirm", choices=["off", "strict", "loose", "one-way"], default="off")
+    ap.add_argument("--dd-aware", choices=["off", "gradual", "binary"], default="off")
+    ap.add_argument("--asymmetric-sizing", action="store_true")
+    ap.add_argument("--ema-grid", action="store_true")
+    ap.add_argument("--round2-suite", action="store_true")
     ap.add_argument("--intraday-timing", action="store_true")
     ap.add_argument("--eth-5m-csv", default="data/ETHUSDC_5m.csv")
     ap.add_argument("--include-gold", action="store_true")
@@ -369,7 +638,17 @@ def main() -> int:
     ap.add_argument("--out-daily-csv", default="artifacts/backtest/eth_btc_portfolio_daily.csv")
     args = ap.parse_args()
 
+    if bool(args.ema_grid) or bool(args.round2_suite):
+        return run_round2_suite(args)
+
     def_proxy = load_eth_defensive_proxy(Path(args.eth_defensive_csv), Path(args.eth_perp_csv), bool(args.pup_fallback))
+    eth_secondary = None
+    btc_secondary = None
+    if str(args.cross_confirm) in {"strict", "loose", "one-way"}:
+        eth_ctx = _signal_context(args.eth_symbol, args.start, args.end, tuple(args.eth_ema))
+        btc_ctx = _signal_context(args.btc_symbol, args.start, args.end, tuple(args.btc_ema))
+        btc_secondary = eth_ctx
+        eth_secondary = btc_ctx if str(args.cross_confirm) != "one-way" else None
 
     eth = run_sleeve(
         symbol=args.eth_symbol,
@@ -384,6 +663,9 @@ def main() -> int:
         start=args.start,
         end=args.end,
         out_price_csv=Path("data/eth_daily.csv"),
+        ema_spans=tuple(args.eth_ema),
+        secondary_confirm=eth_secondary,
+        cross_confirm_variant=str(args.cross_confirm),
     )
     btc = run_sleeve(
         symbol=args.btc_symbol,
@@ -398,6 +680,9 @@ def main() -> int:
         start=args.start,
         end=args.end,
         out_price_csv=Path("data/btc_daily.csv"),
+        ema_spans=tuple(args.btc_ema),
+        secondary_confirm=btc_secondary,
+        cross_confirm_variant=str(args.cross_confirm),
     )
 
     keep = [
@@ -420,6 +705,9 @@ def main() -> int:
         "stop_loss_whipsaw",
         "transition_class",
         "transition_multiplier",
+        "conviction",
+        "cross_trades_removed",
+        "cross_trades_delayed",
     ]
     e = eth[keep].copy().rename(
         columns={
@@ -440,6 +728,9 @@ def main() -> int:
             "stop_loss_whipsaw": "eth_stop_loss_whipsaw",
             "transition_class": "eth_transition_class",
             "transition_multiplier": "eth_transition_multiplier",
+            "conviction": "eth_conviction",
+            "cross_trades_removed": "eth_cross_trades_removed",
+            "cross_trades_delayed": "eth_cross_trades_delayed",
         }
     )
     b = btc[keep].copy().rename(
@@ -461,6 +752,9 @@ def main() -> int:
             "stop_loss_whipsaw": "btc_stop_loss_whipsaw",
             "transition_class": "btc_transition_class",
             "transition_multiplier": "btc_transition_multiplier",
+            "conviction": "btc_conviction",
+            "cross_trades_removed": "btc_cross_trades_removed",
+            "cross_trades_delayed": "btc_cross_trades_delayed",
         }
     )
 
@@ -498,6 +792,68 @@ def main() -> int:
         over = gross > float(args.gross_cap)
         merged.loc[over, "alloc_eth"] = merged.loc[over, "alloc_eth"] * float(args.gross_cap) / gross.loc[over]
         merged.loc[over, "alloc_btc"] = merged.loc[over, "alloc_btc"] * float(args.gross_cap) / gross.loc[over]
+
+    merged["asym_eth_multiplier"] = 1.0
+    merged["asym_btc_multiplier"] = 1.0
+    if bool(args.asymmetric_sizing):
+        vol_score = np.select(
+            [
+                pd.to_numeric(merged["vol_percentile"], errors="coerce") < 0.25,
+                pd.to_numeric(merged["vol_percentile"], errors="coerce") > 0.75,
+            ],
+            [0.33, 0.10],
+            default=0.20,
+        )
+        merged["eth_conviction_total"] = pd.to_numeric(merged["eth_conviction"], errors="coerce").fillna(0.0) + vol_score
+        merged["btc_conviction_total"] = pd.to_numeric(merged["btc_conviction"], errors="coerce").fillna(0.0) + vol_score
+
+        def conv_mult(s: pd.Series) -> pd.Series:
+            return pd.Series(
+                np.select(
+                    [s > 0.80, s >= 0.60, s >= 0.40],
+                    [1.2, 1.0, 0.8],
+                    default=0.6,
+                ),
+                index=s.index,
+            )
+
+        merged["asym_eth_multiplier"] = conv_mult(merged["eth_conviction_total"])
+        merged["asym_btc_multiplier"] = conv_mult(merged["btc_conviction_total"])
+        merged["alloc_eth"] = merged["alloc_eth"] * merged["asym_eth_multiplier"]
+        merged["alloc_btc"] = merged["alloc_btc"] * merged["asym_btc_multiplier"]
+        gross = merged["alloc_eth"] + merged["alloc_btc"]
+        over = gross > float(args.gross_cap)
+        merged.loc[over, "alloc_eth"] = merged.loc[over, "alloc_eth"] * float(args.gross_cap) / gross.loc[over]
+        merged.loc[over, "alloc_btc"] = merged.loc[over, "alloc_btc"] * float(args.gross_cap) / gross.loc[over]
+
+    merged["dd_multiplier"] = 1.0
+    if str(args.dd_aware) != "off":
+        dd_mults: list[float] = []
+        eq = 1.0
+        peak = 1.0
+        for _, row in merged.iterrows():
+            current_dd = (eq - peak) / peak if peak > 0 else 0.0
+            if str(args.dd_aware) == "binary":
+                mult = 0.5 if current_dd <= -0.10 else 1.0
+            elif current_dd <= -0.15:
+                mult = 0.25
+            elif current_dd <= -0.10:
+                mult = 0.50
+            elif current_dd <= -0.05:
+                mult = 0.75
+            else:
+                mult = 1.0
+            dd_mults.append(mult)
+            r = (
+                float(row["alloc_eth"]) * float(row["eth_strategy_return"])
+                + float(row["alloc_btc"]) * float(row["btc_strategy_return"])
+            ) * mult
+            eq *= 1.0 + r
+            peak = max(peak, eq)
+        merged["dd_multiplier"] = dd_mults
+        active_any = (merged["alloc_eth"] > 0) | (merged["alloc_btc"] > 0)
+        merged.loc[active_any, "alloc_eth"] = merged.loc[active_any, "alloc_eth"] * merged.loc[active_any, "dd_multiplier"]
+        merged.loc[active_any, "alloc_btc"] = merged.loc[active_any, "alloc_btc"] * merged.loc[active_any, "dd_multiplier"]
 
     merged["eth_timing_improvement"] = 0.0
     merged["eth_timing_benefit"] = 0.0
@@ -582,6 +938,15 @@ def main() -> int:
     macro_active_days = int((merged["sp_regime"].astype(str).eq("BEAR") & ((merged["eth_weight_exec"] > 0) | (merged["btc_weight_exec"] > 0))).sum())
     high_vol_days = int((pd.to_numeric(merged["vol_percentile"], errors="coerce") > 0.75).sum())
     low_vol_days = int((pd.to_numeric(merged["vol_percentile"], errors="coerce") < 0.25).sum())
+    dd_mult = pd.to_numeric(merged["dd_multiplier"], errors="coerce").fillna(1.0)
+    dd_days_075 = int((dd_mult == 0.75).sum())
+    dd_days_050 = int((dd_mult == 0.50).sum())
+    dd_days_025 = int((dd_mult == 0.25).sum())
+    avg_dd_multiplier = float(dd_mult.mean())
+    eth_cross_removed = int(pd.to_numeric(merged["eth_cross_trades_removed"], errors="coerce").fillna(0).max())
+    btc_cross_removed = int(pd.to_numeric(merged["btc_cross_trades_removed"], errors="coerce").fillna(0).max())
+    eth_cross_delayed = int(pd.to_numeric(merged["eth_cross_trades_delayed"], errors="coerce").fillna(0).max())
+    btc_cross_delayed = int(pd.to_numeric(merged["btc_cross_trades_delayed"], errors="coerce").fillna(0).max())
     eth_stops = int(pd.to_numeric(merged["eth_stop_loss_exit"], errors="coerce").fillna(0).sum())
     btc_stops = int(pd.to_numeric(merged["btc_stop_loss_exit"], errors="coerce").fillna(0).sum())
     eth_whips = int(pd.to_numeric(merged["eth_stop_loss_whipsaw"], errors="coerce").fillna(0).sum())
@@ -620,6 +985,11 @@ def main() -> int:
                 "stop_loss_pct": float(args.stop_loss_pct),
                 "vol_filter": bool(args.vol_filter),
                 "transition_momentum": bool(args.transition_momentum),
+                "cross_confirm": str(args.cross_confirm),
+                "dd_aware": str(args.dd_aware),
+                "asymmetric_sizing": bool(args.asymmetric_sizing),
+                "eth_ema": "/".join(str(x) for x in tuple(args.eth_ema)),
+                "btc_ema": "/".join(str(x) for x in tuple(args.btc_ema)),
                 "intraday_timing": bool(args.intraday_timing),
                 "include_gold": bool(args.include_gold),
                 "gold_symbol": str(merged["gold_symbol_used"].iloc[-1]) if bool(args.include_gold) else "",
@@ -656,6 +1026,16 @@ def main() -> int:
                 "macro_active_days_affected": macro_active_days,
                 "high_vol_days": high_vol_days,
                 "low_vol_days": low_vol_days,
+                "dd_days_075": dd_days_075,
+                "dd_days_050": dd_days_050,
+                "dd_days_025": dd_days_025,
+                "avg_dd_multiplier": avg_dd_multiplier,
+                "eth_cross_trades_removed": eth_cross_removed,
+                "btc_cross_trades_removed": btc_cross_removed,
+                "eth_cross_trades_delayed": eth_cross_delayed,
+                "btc_cross_trades_delayed": btc_cross_delayed,
+                "avg_eth_asym_multiplier": float(pd.to_numeric(merged["asym_eth_multiplier"], errors="coerce").mean()),
+                "avg_btc_asym_multiplier": float(pd.to_numeric(merged["asym_btc_multiplier"], errors="coerce").mean()),
                 "stop_loss_total": eth_stops + btc_stops,
                 "stop_loss_whipsaws": eth_whips + btc_whips,
                 "stop_loss_whipsaw_pct": (eth_whips + btc_whips) / (eth_stops + btc_stops) if (eth_stops + btc_stops) else 0.0,
