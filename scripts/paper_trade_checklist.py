@@ -556,6 +556,16 @@ def _send_discord_summary(webhook_url: str, summary: dict[str, object], timeout_
         f"Status: **{status}**",
         str(summary.get("flags_text", "No flags")),
     ]
+    live_lines: list[str] = []
+    if bool(summary.get("live_mode_requested", False)):
+        live_lines = [
+            f"Mode: {'DRY RUN' if bool(summary.get('live_execution_dry_run', True)) else 'REAL'}",
+            f"ETH: {summary.get('live_eth_status', 'NA')}",
+            f"BTC: {summary.get('live_btc_status', 'NA')}",
+            f"Fees: ${_fmt_num(_safe_num(summary.get('live_total_fees_usd', np.nan)), 2)}",
+        ]
+        if str(summary.get("live_execution_error", "")).strip():
+            live_lines.append(f"Error: {summary.get('live_execution_error')}")
 
     fields = [
         {"name": "Market", "value": "\n".join(market_lines), "inline": False},
@@ -569,6 +579,8 @@ def _send_discord_summary(webhook_url: str, summary: dict[str, object], timeout_
         {"name": "News", "value": "\n".join(news_lines), "inline": False},
         {"name": "Health", "value": "\n".join(health_lines), "inline": False},
     ]
+    if live_lines:
+        fields.insert(-2, {"name": "Live Execution", "value": "\n".join(live_lines), "inline": False})
 
     if bool(summary.get("off_position", False)):
         fields.insert(
@@ -712,6 +724,7 @@ def _run() -> int:
     p.add_argument("--review-dd20", type=float, default=-0.15)
     p.add_argument("--discord-webhook", default=os.environ.get("DISCORD_WEBHOOK_URL", ""))
     p.add_argument("--discord-timeout-sec", type=float, default=10.0)
+    p.add_argument("--live", action="store_true", help="Call Kraken execution engine. Still dry-run unless LIVE_TRADING_ENABLED=true.")
     p.add_argument("--off-ema-fast", type=int, default=21)
     p.add_argument("--off-ema-mid", type=int, default=55)
     p.add_argument("--off-ema-slow", type=int, default=144)
@@ -1664,6 +1677,24 @@ def _run() -> int:
     if days_live < 1:
         days_live = 1
 
+    live_execution_report: dict[str, object] = {}
+    live_execution_error = ""
+    live_execution_dry_run = True
+    if bool(args.live):
+        try:
+            from execution_kraken import execute_strategy_signal
+
+            live_execution_dry_run = os.getenv("LIVE_TRADING_ENABLED", "").strip().lower() != "true"
+            live_execution_report = execute_strategy_signal(
+                eth_target_weight=float(comb_w) if np.isfinite(comb_w) else 0.0,
+                btc_target_weight=float(btc_comb_w) if np.isfinite(btc_comb_w) else 0.0,
+                total_capital_usd=None,
+                dry_run=live_execution_dry_run,
+            )
+        except Exception as exc:
+            live_execution_error = f"{type(exc).__name__}: {exc}"
+            reviews.append(f"live_execution_failed:{str(exc)[:120]}")
+
     news_row = _latest_news_row(Path(args.news_log_csv))
     markets_lines = _latest_market_lines(Path(args.market_log_csv))
     news_major_event = False
@@ -1850,6 +1881,15 @@ def _run() -> int:
         f"Perf combined: strat={_fmt_pct(portfolio_strategy_ret, 2)} basket={_fmt_pct(portfolio_spot_ret, 2)} "
         f"excess={_fmt_pct(portfolio_excess_vs_basket, 2)} peak_dd={_fmt_pct(portfolio_peak_dd, 2)}"
     )
+    if bool(args.live):
+        eth_live_status = str((live_execution_report.get("eth_trade") or {}).get("status", "NA")) if live_execution_report else "NA"
+        btc_live_status = str((live_execution_report.get("btc_trade") or {}).get("status", "NA")) if live_execution_report else "NA"
+        print(
+            f"Live execution: {'DRY RUN' if live_execution_dry_run else 'REAL'} | "
+            f"ETH={eth_live_status} "
+            f"BTC={btc_live_status} "
+            f"error={live_execution_error or 'none'}"
+        )
     print("---")
     print(f"STATUS: {status}")
     if all_reasons:
@@ -2014,6 +2054,13 @@ def _run() -> int:
         "portfolio_spot_ret": portfolio_spot_ret,
         "portfolio_excess_vs_basket": portfolio_excess_vs_basket,
         "portfolio_peak_dd": portfolio_peak_dd,
+        "live_mode_requested": bool(args.live),
+        "live_execution_dry_run": bool(live_execution_dry_run),
+        "live_execution_error": live_execution_error,
+        "live_execution_time_ms": _safe_num(live_execution_report.get("execution_time_ms", np.nan)) if live_execution_report else np.nan,
+        "live_total_fees_usd": _safe_num(live_execution_report.get("total_fees_usd", np.nan)) if live_execution_report else np.nan,
+        "live_eth_status": str((live_execution_report.get("eth_trade") or {}).get("status", "")) if live_execution_report else "",
+        "live_btc_status": str((live_execution_report.get("btc_trade") or {}).get("status", "")) if live_execution_report else "",
         "chop_bps_bar_60d": chop_bps_60d,
         "stop_rolling_30d_sharpe": bool(np.isfinite(rolling_30d_sharpe) and rolling_30d_sharpe < float(args.stop_rolling_sharpe)),
         "stop_drawdown": bool(np.isfinite(peak_dd) and peak_dd < float(args.stop_drawdown)),
@@ -2169,6 +2216,12 @@ def _run() -> int:
             "portfolio_spot_ret": portfolio_spot_ret,
             "portfolio_excess_vs_basket": portfolio_excess_vs_basket,
             "portfolio_peak_dd": portfolio_peak_dd,
+            "live_mode_requested": out_row["live_mode_requested"],
+            "live_execution_dry_run": out_row["live_execution_dry_run"],
+            "live_execution_error": out_row["live_execution_error"],
+            "live_total_fees_usd": out_row["live_total_fees_usd"],
+            "live_eth_status": out_row["live_eth_status"],
+            "live_btc_status": out_row["live_btc_status"],
             "flags_text": out_row["flags_text"],
             "paper_start_date": out_row["paper_start_date"],
             "days_live": out_row["days_live"],
