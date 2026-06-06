@@ -681,7 +681,11 @@ def _run() -> int:
     p.add_argument("--completed-trades-csv", default="")
     args = p.parse_args()
 
-    portfolio_cfg = _load_portfolio_config(Path(args.portfolio_config))
+    portfolio_cfg_path = Path(args.portfolio_config)
+    portfolio_cfg = _load_portfolio_config(portfolio_cfg_path)
+    if not portfolio_cfg and str(portfolio_cfg_path).replace("\\", "/") != "artifacts/backtest/portfolio_config.json":
+        portfolio_cfg_path = Path("artifacts/backtest/portfolio_config.json")
+        portfolio_cfg = _load_portfolio_config(portfolio_cfg_path)
     if portfolio_cfg:
         args.off_confirm_days = _cfg_int(portfolio_cfg, "eth_confirm_days", int(args.off_confirm_days))
         args.btc_confirm_days = _cfg_int(portfolio_cfg, "btc_confirm_days", int(args.btc_confirm_days))
@@ -820,6 +824,15 @@ def _run() -> int:
                     c0 = float(prev[cc].iloc[-1])
                     if c0 > 0:
                         eth_24h_pct = float(eth_price / c0 - 1.0)
+            min_vol_days = max(60, _cfg_int(portfolio_cfg, "vol_rank_window", 252))
+            if len(daily_close.dropna()) < min_vol_days:
+                fetched_daily = _fetch_binance_daily_close("ETHUSDC", limit=max(800, min_vol_days + 50))
+                if len(fetched_daily):
+                    fetched_daily["day"] = fetched_daily["timestamp"].dt.floor("D")
+                    daily_close = pd.Series(
+                        pd.to_numeric(fetched_daily["close"], errors="coerce").to_numpy(dtype=float),
+                        index=fetched_daily["day"],
+                    ).dropna()
             if vol_filter_enabled:
                 vol_state = _vol_filter_state(daily_close, portfolio_cfg)
 
