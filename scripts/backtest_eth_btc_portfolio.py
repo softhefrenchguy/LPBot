@@ -116,6 +116,91 @@ def _derisk_multiplier(p_up_eff: pd.Series) -> tuple[np.ndarray, np.ndarray]:
     return np.asarray(lows, dtype=int), np.asarray(mults, dtype=float)
 
 
+def _download_yfinance_daily(ticker: str, start: str, end: str, out_csv: Path) -> pd.DataFrame:
+    if out_csv.exists():
+        d = pd.read_csv(out_csv)
+        date_col = "Date" if "Date" in d.columns else "day" if "day" in d.columns else "timestamp"
+        d["day"] = pd.to_datetime(d[date_col], utc=True, errors="coerce").dt.floor("D")
+        close_col = "Close" if "Close" in d.columns else "close"
+        d["close"] = pd.to_numeric(d[close_col], errors="coerce")
+        return d.dropna(subset=["day", "close"])[["day", "close"]].sort_values("day").copy()
+    x = yf.download(
+        ticker,
+        start=start,
+        end=(pd.Timestamp(end) + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
+        interval="1d",
+        auto_adjust=True,
+        progress=False,
+    )
+    if x is None or x.empty:
+        raise RuntimeError(f"No yfinance data for {ticker}")
+    if isinstance(x.columns, pd.MultiIndex):
+        x.columns = x.columns.get_level_values(0)
+    x = x.reset_index()
+    x["day"] = pd.to_datetime(x["Date"], utc=True, errors="coerce").dt.floor("D")
+    x["close"] = pd.to_numeric(x["Close"], errors="coerce")
+    out = x.dropna(subset=["day", "close"])[["day", "close"]].sort_values("day").copy()
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(out_csv, index=False)
+    return out
+
+
+def _sp500_macro_frame(start: str, end: str, out_csv: Path) -> pd.DataFrame:
+    s = _download_yfinance_daily("^GSPC", start, end, out_csv)
+    s["sp_ema21"] = s["close"].ewm(span=21, adjust=False).mean()
+    s["sp_ema55"] = s["close"].ewm(span=55, adjust=False).mean()
+    s["sp_ema144"] = s["close"].ewm(span=144, adjust=False).mean()
+    s["sp_regime"] = np.where(
+        (s["sp_ema21"] > s["sp_ema55"]) & (s["sp_ema55"] > s["sp_ema144"]),
+        "BULL",
+        np.where((s["sp_ema21"] < s["sp_ema55"]) & (s["sp_ema55"] < s["sp_ema144"]), "BEAR", "CHOP"),
+    )
+    s["macro_multiplier"] = np.where(s["sp_regime"] == "BEAR", 0.5, 1.0)
+    return s[["day", "sp_regime", "macro_multiplier"]].copy()
+
+
+def _eth_vol_frame(eth_daily: pd.DataFrame) -> pd.DataFrame:
+    v = eth_daily[["day", "close"]].copy()
+    ret = v["close"].pct_change()
+    v["rolling_vol_20d"] = ret.rolling(20, min_periods=20).std(ddof=0) * np.sqrt(252.0)
+
+    def pct_rank(x: pd.Series) -> float:
+        if x.isna().all():
+            return np.nan
+        return float(x.rank(pct=True).iloc[-1])
+
+    v["vol_percentile"] = v["rolling_vol_20d"].rolling(252, min_periods=60).apply(pct_rank, raw=False)
+    v["vol_multiplier"] = 1.0
+    v.loc[v["vol_percentile"] > 0.75, "vol_multiplier"] = 0.5
+    v.loc[v["vol_percentile"] < 0.25, "vol_multiplier"] = 1.2
+    return v[["day", "rolling_vol_20d", "vol_percentile", "vol_multiplier"]].copy()
+
+
+def _intraday_timing_frame(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame(columns=["day", "eth_open_5m", "eth_low_4h", "eth_timing_improvement"])
+    d = pd.read_csv(path, low_memory=False)
+    if "timestamp" not in d.columns:
+        return pd.DataFrame(columns=["day", "eth_open_5m", "eth_low_4h", "eth_timing_improvement"])
+    d["timestamp"] = pd.to_datetime(d["timestamp"], utc=True, errors="coerce")
+    close_col = "close" if "close" in d.columns else "Close" if "Close" in d.columns else None
+    low_col = "low" if "low" in d.columns else "Low" if "Low" in d.columns else close_col
+    open_col = "open" if "open" in d.columns else "Open" if "Open" in d.columns else close_col
+    if close_col is None or low_col is None or open_col is None:
+        return pd.DataFrame(columns=["day", "eth_open_5m", "eth_low_4h", "eth_timing_improvement"])
+    d["open"] = pd.to_numeric(d[open_col], errors="coerce")
+    d["low"] = pd.to_numeric(d[low_col], errors="coerce")
+    d = d.dropna(subset=["timestamp", "open", "low"]).sort_values("timestamp")
+    d["day"] = d["timestamp"].dt.floor("D")
+    d["minute_of_day"] = (d["timestamp"] - d["day"]).dt.total_seconds() / 60.0
+    first4 = d[d["minute_of_day"] < 240].copy()
+    if first4.empty:
+        return pd.DataFrame(columns=["day", "eth_open_5m", "eth_low_4h", "eth_timing_improvement"])
+    out = first4.groupby("day").agg(eth_open_5m=("open", "first"), eth_low_4h=("low", "min")).reset_index()
+    out["eth_timing_improvement"] = ((out["eth_open_5m"] - out["eth_low_4h"]) / out["eth_open_5m"]).clip(lower=0.0)
+    return out
+
+
 def run_sleeve(
     symbol: str,
     confirm_days: int,
@@ -123,6 +208,9 @@ def run_sleeve(
     cost_bps: float,
     cost_mode: str,
     derisking: bool,
+    stop_loss: bool,
+    stop_loss_pct: float,
+    transition_momentum: bool,
     start: str,
     end: str,
     out_price_csv: Path,
@@ -148,20 +236,69 @@ def run_sleeve(
     d["vol_scalar"] = (0.50 / rv.replace(0.0, np.nan)).replace([np.inf, -np.inf], np.nan).clip(lower=0.25, upper=1.0).fillna(0.25)
 
     pos = np.zeros(len(d), dtype=int)
+    trade_id = np.zeros(len(d), dtype=int)
+    stop_loss_exit = np.zeros(len(d), dtype=int)
+    stop_loss_whipsaw = np.zeros(len(d), dtype=int)
+    transition_class = np.array(["NONE"] * len(d), dtype=object)
+    transition_mult = np.ones(len(d), dtype=float)
     active = 0
+    entry_i: int | None = None
+    entry_open = np.nan
+    cur_trade_id = 0
     for i in range(len(d)):
         if active == 0 and bool(entry.iloc[i]):
             active = 1
+            entry_i = i
+            cur_trade_id += 1
+            entry_open = float(d["open"].iloc[i + 1]) if i + 1 < len(d) else float(d["close"].iloc[i])
+            if transition_momentum:
+                prev_reg = d["regime_v2"].shift(1)
+                flip_mask = (d["regime_v2"] != prev_reg) & d["regime_v2"].isin(["BULL", "CHOP"])
+                flips = np.flatnonzero(flip_mask.iloc[: i + 1].to_numpy())
+                if len(flips):
+                    fi = int(flips[-1])
+                    tr = float(d["close"].pct_change().iloc[fi]) if pd.notna(d["close"].pct_change().iloc[fi]) else 0.0
+                    if tr > 0.03:
+                        transition_class[i] = "STRONG"
+                    elif tr < 0.01:
+                        transition_class[i] = "WEAK"
+                        transition_mult[i] = 0.6
+                    else:
+                        transition_class[i] = "MID"
         elif active == 1 and bool(exit_.iloc[i]):
             active = 0
+            entry_i = None
+        elif active == 1 and stop_loss and entry_i is not None and np.isfinite(entry_open) and entry_open > 0:
+            trade_ret = float(d["close"].iloc[i] / entry_open - 1.0)
+            if trade_ret < -abs(float(stop_loss_pct)):
+                active = 0
+                stop_loss_exit[i] = 1
+                future = d["close"].iloc[i + 1 : i + 11]
+                if len(future) and bool((future > entry_open).any()):
+                    stop_loss_whipsaw[i] = 1
+                entry_i = None
+        if active == 1 and transition_momentum and entry_i is not None:
+            transition_class[i] = transition_class[entry_i]
+            if transition_class[entry_i] == "WEAK":
+                held = i - entry_i
+                trade_positive = np.isfinite(entry_open) and entry_open > 0 and float(d["close"].iloc[i] / entry_open - 1.0) > 0.0
+                transition_mult[i] = 1.0 if held >= 5 and trade_positive else 0.6
         pos[i] = active
+        trade_id[i] = cur_trade_id if active else 0
     d["off_active"] = pos
+    d["trade_id"] = trade_id
+    d["stop_loss_exit"] = stop_loss_exit
+    d["stop_loss_whipsaw"] = stop_loss_whipsaw
+    d["transition_class"] = transition_class
+    d["transition_multiplier"] = transition_mult
     d["off_raw_signal"] = np.where(d["off_active"] == 1, d["vol_scalar"], 0.0)
 
     off_scale_map = {"BULL": 0.8, "CHOP": 0.4, "BEAR": 0.0}
     def_scale_map = {"BULL": 0.0, "CHOP": 0.4, "BEAR": 1.0}
     d["off_scale"] = d["regime_v2"].map(off_scale_map).fillna(0.0)
     d["off_target"] = d["off_raw_signal"] * d["off_scale"]
+    if transition_momentum:
+        d["off_target"] = d["off_target"] * d["transition_multiplier"]
 
     x = d.merge(def_proxy, on="day", how="left")
     x["def_proxy_signal"] = pd.to_numeric(x["def_proxy_signal"], errors="coerce").fillna(0.0)
@@ -215,6 +352,13 @@ def main() -> int:
     ap.add_argument("--gross-cap", type=float, default=0.8)
     ap.add_argument("--derisking", action="store_true")
     ap.add_argument("--pup-fallback", action="store_true")
+    ap.add_argument("--macro-filter", action="store_true")
+    ap.add_argument("--stop-loss", action="store_true")
+    ap.add_argument("--stop-loss-pct", type=float, default=0.08)
+    ap.add_argument("--vol-filter", action="store_true")
+    ap.add_argument("--transition-momentum", action="store_true")
+    ap.add_argument("--intraday-timing", action="store_true")
+    ap.add_argument("--eth-5m-csv", default="data/ETHUSDC_5m.csv")
     ap.add_argument("--include-gold", action="store_true")
     ap.add_argument("--gold-symbol", default="PAXG-USD")
     ap.add_argument("--gold-cap", type=float, default=0.3)
@@ -234,6 +378,9 @@ def main() -> int:
         cost_bps=float(args.cost_bps),
         cost_mode=str(args.cost_mode),
         derisking=bool(args.derisking),
+        stop_loss=bool(args.stop_loss),
+        stop_loss_pct=float(args.stop_loss_pct),
+        transition_momentum=bool(args.transition_momentum),
         start=args.start,
         end=args.end,
         out_price_csv=Path("data/eth_daily.csv"),
@@ -245,6 +392,9 @@ def main() -> int:
         cost_bps=float(args.cost_bps),
         cost_mode=str(args.cost_mode),
         derisking=bool(args.derisking),
+        stop_loss=bool(args.stop_loss),
+        stop_loss_pct=float(args.stop_loss_pct),
+        transition_momentum=bool(args.transition_momentum),
         start=args.start,
         end=args.end,
         out_price_csv=Path("data/btc_daily.csv"),
@@ -266,6 +416,10 @@ def main() -> int:
         "p_up_low_days",
         "derisk_multiplier",
         "pup_fallback_used",
+        "stop_loss_exit",
+        "stop_loss_whipsaw",
+        "transition_class",
+        "transition_multiplier",
     ]
     e = eth[keep].copy().rename(
         columns={
@@ -282,6 +436,10 @@ def main() -> int:
             "p_up_low_days": "eth_p_up_low_days",
             "derisk_multiplier": "eth_derisk_multiplier",
             "pup_fallback_used": "eth_pup_fallback_used",
+            "stop_loss_exit": "eth_stop_loss_exit",
+            "stop_loss_whipsaw": "eth_stop_loss_whipsaw",
+            "transition_class": "eth_transition_class",
+            "transition_multiplier": "eth_transition_multiplier",
         }
     )
     b = btc[keep].copy().rename(
@@ -299,6 +457,10 @@ def main() -> int:
             "p_up_low_days": "btc_p_up_low_days",
             "derisk_multiplier": "btc_derisk_multiplier",
             "pup_fallback_used": "btc_pup_fallback_used",
+            "stop_loss_exit": "btc_stop_loss_exit",
+            "stop_loss_whipsaw": "btc_stop_loss_whipsaw",
+            "transition_class": "btc_transition_class",
+            "transition_multiplier": "btc_transition_multiplier",
         }
     )
 
@@ -312,6 +474,44 @@ def main() -> int:
     else:
         merged["alloc_eth"] = 0.5
         merged["alloc_btc"] = 0.5
+
+    merged["macro_multiplier"] = 1.0
+    merged["sp_regime"] = ""
+    if bool(args.macro_filter):
+        sp = _sp500_macro_frame(args.start, args.end, Path("data/sp500_daily.csv"))
+        merged = merged.drop(columns=["macro_multiplier", "sp_regime"], errors="ignore").merge(sp, on="day", how="left")
+        merged["sp_regime"] = merged["sp_regime"].ffill().fillna("CHOP")
+        merged["macro_multiplier"] = pd.to_numeric(merged["macro_multiplier"], errors="coerce").fillna(1.0)
+        merged["alloc_eth"] = merged["alloc_eth"] * merged["macro_multiplier"]
+        merged["alloc_btc"] = merged["alloc_btc"] * merged["macro_multiplier"]
+
+    merged["vol_multiplier"] = 1.0
+    merged["vol_percentile"] = np.nan
+    if bool(args.vol_filter):
+        vf = _eth_vol_frame(eth[["day", "close"]].copy())
+        merged = merged.drop(columns=["vol_multiplier", "vol_percentile"], errors="ignore").merge(vf, on="day", how="left")
+        merged["vol_multiplier"] = pd.to_numeric(merged["vol_multiplier"], errors="coerce").fillna(1.0)
+        merged["vol_percentile"] = pd.to_numeric(merged["vol_percentile"], errors="coerce")
+        merged["alloc_eth"] = merged["alloc_eth"] * merged["vol_multiplier"]
+        merged["alloc_btc"] = merged["alloc_btc"] * merged["vol_multiplier"]
+        gross = merged["alloc_eth"] + merged["alloc_btc"]
+        over = gross > float(args.gross_cap)
+        merged.loc[over, "alloc_eth"] = merged.loc[over, "alloc_eth"] * float(args.gross_cap) / gross.loc[over]
+        merged.loc[over, "alloc_btc"] = merged.loc[over, "alloc_btc"] * float(args.gross_cap) / gross.loc[over]
+
+    merged["eth_timing_improvement"] = 0.0
+    merged["eth_timing_benefit"] = 0.0
+    if bool(args.intraday_timing):
+        timing = _intraday_timing_frame(Path(args.eth_5m_csv))
+        if not timing.empty:
+            merged = merged.drop(columns=["eth_timing_improvement"], errors="ignore").merge(timing[["day", "eth_timing_improvement"]], on="day", how="left")
+            merged["eth_timing_improvement"] = pd.to_numeric(merged["eth_timing_improvement"], errors="coerce").fillna(0.0)
+            eth_prev_w = merged["eth_weight_exec"].shift(1).fillna(0.0)
+            eth_increase = (merged["eth_weight_exec"] - eth_prev_w).clip(lower=0.0)
+            # Use half the theoretical best-first-4h fill improvement to avoid
+            # treating every limit order as filled at the exact low.
+            merged["eth_timing_benefit"] = eth_increase * merged["eth_timing_improvement"] * 0.5
+            merged["eth_strategy_return"] = merged["eth_strategy_return"] + merged["eth_timing_benefit"]
 
     merged["gold_symbol_used"] = ""
     merged["gold_weight_exec"] = 0.0
@@ -378,6 +578,25 @@ def main() -> int:
 
     corr_strategy = float(merged["eth_strategy_return"].corr(merged["btc_strategy_return"]))
     corr_spot = float(merged["eth_spot_return"].corr(merged["btc_spot_return"]))
+    macro_bear_days = int(merged["sp_regime"].astype(str).eq("BEAR").sum())
+    macro_active_days = int((merged["sp_regime"].astype(str).eq("BEAR") & ((merged["eth_weight_exec"] > 0) | (merged["btc_weight_exec"] > 0))).sum())
+    high_vol_days = int((pd.to_numeric(merged["vol_percentile"], errors="coerce") > 0.75).sum())
+    low_vol_days = int((pd.to_numeric(merged["vol_percentile"], errors="coerce") < 0.25).sum())
+    eth_stops = int(pd.to_numeric(merged["eth_stop_loss_exit"], errors="coerce").fillna(0).sum())
+    btc_stops = int(pd.to_numeric(merged["btc_stop_loss_exit"], errors="coerce").fillna(0).sum())
+    eth_whips = int(pd.to_numeric(merged["eth_stop_loss_whipsaw"], errors="coerce").fillna(0).sum())
+    btc_whips = int(pd.to_numeric(merged["btc_stop_loss_whipsaw"], errors="coerce").fillna(0).sum())
+    strong_transitions = int(
+        ((merged["eth_transition_class"].astype(str) == "STRONG") & (merged["eth_weight_exec"] > 0)).sum()
+        + ((merged["btc_transition_class"].astype(str) == "STRONG") & (merged["btc_weight_exec"] > 0)).sum()
+    )
+    weak_transitions = int(
+        ((merged["eth_transition_class"].astype(str) == "WEAK") & (merged["eth_weight_exec"] > 0)).sum()
+        + ((merged["btc_transition_class"].astype(str) == "WEAK") & (merged["btc_weight_exec"] > 0)).sum()
+    )
+    timing_entry_days = int((pd.to_numeric(merged["eth_timing_benefit"], errors="coerce").fillna(0.0) > 0).sum())
+    avg_timing_bps = float(pd.to_numeric(merged.loc[merged["eth_timing_benefit"] > 0, "eth_timing_improvement"], errors="coerce").mean() * 10000.0) if timing_entry_days else 0.0
+    annual_timing_impact = float(pd.to_numeric(merged["eth_timing_benefit"], errors="coerce").fillna(0.0).sum() / max(len(merged) / 252.0, 1e-9))
 
     out_daily = Path(args.out_daily_csv)
     out_daily.parent.mkdir(parents=True, exist_ok=True)
@@ -396,6 +615,12 @@ def main() -> int:
                 "gross_cap": float(args.gross_cap),
                 "derisking": bool(args.derisking),
                 "pup_fallback": bool(args.pup_fallback),
+                "macro_filter": bool(args.macro_filter),
+                "stop_loss": bool(args.stop_loss),
+                "stop_loss_pct": float(args.stop_loss_pct),
+                "vol_filter": bool(args.vol_filter),
+                "transition_momentum": bool(args.transition_momentum),
+                "intraday_timing": bool(args.intraday_timing),
                 "include_gold": bool(args.include_gold),
                 "gold_symbol": str(merged["gold_symbol_used"].iloc[-1]) if bool(args.include_gold) else "",
                 "gold_cap": float(args.gold_cap),
@@ -427,6 +652,18 @@ def main() -> int:
                 if int(((merged["eth_derisk_multiplier"] < 1.0) | (merged["btc_derisk_multiplier"] < 1.0)).sum()) > 0
                 else 1.0,
                 "pup_fallback_days_replaced": int((merged["eth_pup_fallback_used"] | merged["btc_pup_fallback_used"]).sum()),
+                "macro_bear_days": macro_bear_days,
+                "macro_active_days_affected": macro_active_days,
+                "high_vol_days": high_vol_days,
+                "low_vol_days": low_vol_days,
+                "stop_loss_total": eth_stops + btc_stops,
+                "stop_loss_whipsaws": eth_whips + btc_whips,
+                "stop_loss_whipsaw_pct": (eth_whips + btc_whips) / (eth_stops + btc_stops) if (eth_stops + btc_stops) else 0.0,
+                "strong_transition_active_days": strong_transitions,
+                "weak_transition_active_days": weak_transitions,
+                "intraday_timing_entry_days": timing_entry_days,
+                "avg_intraday_improvement_bps": avg_timing_bps,
+                "annual_intraday_timing_impact": annual_timing_impact,
             }
         ]
     )
@@ -453,6 +690,11 @@ def main() -> int:
     print(f"Allocation mode:       {args.allocation_mode} (gross cap={float(args.gross_cap):.2f})")
     print(f"Derisking:             {'ON' if bool(args.derisking) else 'OFF'}")
     print(f"P(up) fallback:        {'ON' if bool(args.pup_fallback) else 'OFF'}")
+    print(f"Macro filter:          {'ON' if bool(args.macro_filter) else 'OFF'} | SP BEAR days={macro_bear_days} active affected={macro_active_days}")
+    print(f"Stop loss:             {'ON' if bool(args.stop_loss) else 'OFF'} | stops={eth_stops + btc_stops} whipsaws={eth_whips + btc_whips}")
+    print(f"Vol filter:            {'ON' if bool(args.vol_filter) else 'OFF'} | high={high_vol_days} low={low_vol_days}")
+    print(f"Transition momentum:   {'ON' if bool(args.transition_momentum) else 'OFF'} | strong={strong_transitions} weak={weak_transitions}")
+    print(f"Intraday timing:       {'ON' if bool(args.intraday_timing) else 'OFF'} | entries={timing_entry_days} avg improve={avg_timing_bps:.1f}bps")
     print(f"Derisk days:           {int(((merged['eth_derisk_multiplier'] < 1.0) | (merged['btc_derisk_multiplier'] < 1.0)).sum())}")
     print(f"P(up) fallback days:   {int((merged['eth_pup_fallback_used'] | merged['btc_pup_fallback_used']).sum())}")
     if bool(args.include_gold):
