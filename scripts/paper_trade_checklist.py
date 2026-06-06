@@ -188,6 +188,151 @@ def _save_json_state(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
+def _load_portfolio_config(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _cfg_bool(cfg: dict[str, object], key: str, default: bool) -> bool:
+    if key not in cfg:
+        return bool(default)
+    v = cfg.get(key)
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _cfg_float(cfg: dict[str, object], key: str, default: float) -> float:
+    try:
+        return float(cfg.get(key, default))
+    except Exception:
+        return float(default)
+
+
+def _cfg_int(cfg: dict[str, object], key: str, default: int) -> int:
+    try:
+        return int(cfg.get(key, default))
+    except Exception:
+        return int(default)
+
+
+def _vol_filter_state(daily_close: pd.Series, cfg: dict[str, object]) -> dict[str, object]:
+    out = {
+        "vol_regime": "NA",
+        "vol_percentile": np.nan,
+        "vol_multiplier": 1.0,
+        "rolling_vol_20d": np.nan,
+    }
+    if len(daily_close) < 30:
+        return out
+    lookback = max(2, _cfg_int(cfg, "vol_lookback", 20))
+    rank_window = max(lookback + 5, _cfg_int(cfg, "vol_rank_window", 252))
+    r = daily_close.astype(float).pct_change()
+    vol = r.rolling(lookback, min_periods=max(5, lookback // 2)).std(ddof=0) * np.sqrt(365.0)
+    if len(vol.dropna()) == 0:
+        return out
+    latest_vol = float(vol.iloc[-1])
+    hist = vol.dropna().iloc[-rank_window:]
+    if len(hist) < 20 or not np.isfinite(latest_vol):
+        return out
+    pct = float((hist <= latest_vol).mean())
+    high_th = _cfg_float(cfg, "vol_high_percentile", 0.75)
+    low_th = _cfg_float(cfg, "vol_low_percentile", 0.25)
+    if pct > high_th:
+        regime = "HIGH"
+        mult = _cfg_float(cfg, "vol_high_multiplier", 0.5)
+    elif pct < low_th:
+        regime = "LOW"
+        mult = _cfg_float(cfg, "vol_low_multiplier", 1.2)
+    else:
+        regime = "NORMAL"
+        mult = 1.0
+    out.update(
+        {
+            "vol_regime": regime,
+            "vol_percentile": pct,
+            "vol_multiplier": float(mult),
+            "rolling_vol_20d": latest_vol,
+        }
+    )
+    return out
+
+
+def _transition_state(
+    daily_close: pd.Series,
+    regime: pd.DataFrame,
+    regime_col: str,
+    paper_start_ts: pd.Timestamp,
+    entry_ts: pd.Timestamp,
+    hold_return: float,
+    cfg: dict[str, object],
+) -> dict[str, object]:
+    out = {
+        "transition_strength": "NA",
+        "transition_multiplier": 1.0,
+        "transition_return": np.nan,
+        "transition_flip_date": "",
+    }
+    if pd.isna(entry_ts) or daily_close.empty or regime.empty or regime_col not in regime.columns:
+        return out
+    rg = regime.copy()
+    rg["day"] = rg["timestamp"].dt.floor("D")
+    rg = rg[rg["day"] >= paper_start_ts].sort_values("day").drop_duplicates("day", keep="last")
+    if rg.empty:
+        return out
+    entry_day = entry_ts.floor("D")
+    rg = rg[rg["day"] <= entry_day]
+    if rg.empty:
+        return out
+    prev = rg[regime_col].astype(str).shift(1)
+    flips = rg[(rg[regime_col].astype(str) != prev) & rg[regime_col].astype(str).isin(["BULL", "CHOP"])]
+    if flips.empty:
+        return out
+    flip_day = pd.Timestamp(flips["day"].iloc[-1])
+    c = daily_close.sort_index()
+    if flip_day not in c.index:
+        prior_idx = c.index[c.index <= flip_day]
+        if len(prior_idx) == 0:
+            return out
+        flip_day = pd.Timestamp(prior_idx[-1])
+    loc = c.index.get_loc(flip_day)
+    if isinstance(loc, slice) or int(loc) <= 0:
+        return out
+    prev_px = float(c.iloc[int(loc) - 1])
+    flip_px = float(c.iloc[int(loc)])
+    if prev_px <= 0:
+        return out
+    tr = float(flip_px / prev_px - 1.0)
+    strong_th = _cfg_float(cfg, "transition_strong_threshold", 0.03)
+    weak_th = _cfg_float(cfg, "transition_weak_threshold", 0.01)
+    scale_up_days = _cfg_int(cfg, "transition_scale_up_days", 5)
+    if tr > strong_th:
+        strength = "STRONG"
+        mult = _cfg_float(cfg, "transition_strong_multiplier", 1.0)
+    elif tr < weak_th:
+        strength = "WEAK"
+        days_held = max(0, int((pd.Timestamp.now("UTC").floor("D") - entry_day).days))
+        positive = np.isfinite(hold_return) and hold_return > 0
+        mult = 1.0 if days_held >= scale_up_days and positive else _cfg_float(cfg, "transition_weak_multiplier", 0.6)
+    else:
+        strength = "NORMAL"
+        mult = 1.0
+    out.update(
+        {
+            "transition_strength": strength,
+            "transition_multiplier": float(mult),
+            "transition_return": tr,
+            "transition_flip_date": str(flip_day.date()),
+        }
+    )
+    return out
+
+
 def _latest_news_row(path: Path) -> dict[str, object]:
     if not path.exists():
         return {}
@@ -274,6 +419,8 @@ def _send_discord_summary(webhook_url: str, summary: dict[str, object], timeout_
         f"Capital deployed: {_fmt_pct(_safe_num(summary.get('combined_weight', np.nan)), 0)}",
         f"Off contribution (scaled): {_fmt_num(off_w_scaled, 4)}",
         f"Def contribution (scaled): {_fmt_num(def_w_scaled, 4)}",
+        f"Vol regime: {summary.get('vol_regime', 'NA')} ({_fmt_pct(_safe_num(summary.get('vol_percentile', np.nan)), 0)} pctile)",
+        f"Transition: {summary.get('transition_strength', 'NA')} x{_fmt_num(_safe_num(summary.get('transition_multiplier', np.nan)), 2)}",
     ]
     off_gate_lines = [
         f"EMA21/55/144: {_fmt_num(_safe_num(summary.get('ema21', np.nan)), 2)} / {_fmt_num(_safe_num(summary.get('ema55', np.nan)), 2)} / {_fmt_num(_safe_num(summary.get('ema144', np.nan)), 2)}",
@@ -311,6 +458,7 @@ def _send_discord_summary(webhook_url: str, summary: dict[str, object], timeout_
         f"Def signal (funding z): {_fmt_num(_safe_num(summary.get('btc_funding_z', np.nan)), 3)}",
         f"Raw signal: {_fmt_num(_safe_num(summary.get('btc_off_weight_raw', np.nan)), 4)}",
         f"Scaled weight: {_fmt_num(_safe_num(summary.get('btc_combined_weight', np.nan)), 4)}",
+        f"Transition: {summary.get('btc_transition_strength', 'NA')} x{_fmt_num(_safe_num(summary.get('btc_transition_multiplier', np.nan)), 2)}",
     ]
     perf_lines = [
         f"Start: {paper_start} | days: {days_live}",
@@ -440,6 +588,7 @@ def _send_discord_summary(webhook_url: str, summary: dict[str, object], timeout_
 
 def _run() -> int:
     p = argparse.ArgumentParser(description="Daily paper-trade checklist for promoted RouterA strategy.")
+    p.add_argument("--portfolio-config", default="config/portfolio_config.json")
     p.add_argument("--price-csv", default="data/ETHUSDC_5m.csv")
     p.add_argument("--funding-csv", default="data/backtest/ETH_perp_features_5m_6y.csv")
     p.add_argument("--regime-csv", default="artifacts/paper_trade/regime_snapshot_immutable.csv")
@@ -532,6 +681,11 @@ def _run() -> int:
     p.add_argument("--completed-trades-csv", default="")
     args = p.parse_args()
 
+    portfolio_cfg = _load_portfolio_config(Path(args.portfolio_config))
+    if portfolio_cfg:
+        args.off_confirm_days = _cfg_int(portfolio_cfg, "eth_confirm_days", int(args.off_confirm_days))
+        args.btc_confirm_days = _cfg_int(portfolio_cfg, "btc_confirm_days", int(args.btc_confirm_days))
+
     now = pd.Timestamp.now("UTC")
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -552,6 +706,10 @@ def _run() -> int:
                 pass
     if pd.isna(paper_start_ts):
         paper_start_ts = now.floor("D")
+
+    vol_filter_enabled = _cfg_bool(portfolio_cfg, "vol_filter", False)
+    transition_momentum_enabled = _cfg_bool(portfolio_cfg, "transition_momentum", False)
+    gross_cap = _cfg_float(portfolio_cfg, "gross_cap", 1.0)
 
     # Load inputs
     price = _read_csv_ts(Path(args.price_csv))
@@ -616,6 +774,7 @@ def _run() -> int:
     eth_price = np.nan
     eth_24h_pct = np.nan
     daily_close = pd.Series(dtype=float)
+    vol_state = {"vol_regime": "NA", "vol_percentile": np.nan, "vol_multiplier": 1.0, "rolling_vol_20d": np.nan}
     if len(price):
         cc = _close_col(price)
         if cc is not None:
@@ -661,6 +820,8 @@ def _run() -> int:
                     c0 = float(prev[cc].iloc[-1])
                     if c0 > 0:
                         eth_24h_pct = float(eth_price / c0 - 1.0)
+            if vol_filter_enabled:
+                vol_state = _vol_filter_state(daily_close, portfolio_cfg)
 
     # 3) Signal states (offensive = computed live from price)
     off_w = 0.0
@@ -900,11 +1061,26 @@ def _run() -> int:
     cap_bind_today = False
     off_scale_map = {"BULL": float(args.router_bull_off), "CHOP": float(args.router_chop_off), "BEAR": float(args.router_bear_off)}
     def_scale_map = {"BULL": float(args.router_bull_def), "CHOP": float(args.router_chop_def), "BEAR": float(args.router_bear_def)}
+    eth_transition = _transition_state(
+        daily_close=daily_close,
+        regime=regime,
+        regime_col=args.regime_col,
+        paper_start_ts=paper_start_ts,
+        entry_ts=off_entry_ts,
+        hold_return=off_hold_ret,
+        cfg=portfolio_cfg,
+    )
+    if not transition_momentum_enabled:
+        eth_transition["transition_multiplier"] = 1.0
+        eth_transition["transition_strength"] = "OFF"
+    vol_multiplier = float(vol_state.get("vol_multiplier", 1.0)) if vol_filter_enabled else 1.0
+    eth_transition_multiplier = float(eth_transition.get("transition_multiplier", 1.0))
     off_scaled = float(off_w) * float(off_scale_map.get(current_regime, 0.0))
+    off_scaled = off_scaled * vol_multiplier * eth_transition_multiplier
     def_scaled = (float(def_w) if np.isfinite(def_w) else 0.0) * float(def_scale_map.get(current_regime, 0.0))
     w_raw = off_scaled + def_scaled
-    comb_w = float(min(1.0, max(0.0, w_raw)))
-    cap_bind_today = bool(w_raw > 1.0 + 1e-9)
+    comb_w = float(min(gross_cap, max(0.0, w_raw)))
+    cap_bind_today = bool(w_raw > gross_cap + 1e-9)
     if cap_bind_today:
         flags.append("cap_bind_today")
 
@@ -1143,8 +1319,22 @@ def _run() -> int:
                     btc_def_w = float(btc_vol_scalar_last)
 
     btc_off_scaled = float(btc_off_w) * float(off_scale_map.get(current_regime, 0.0))
+    btc_transition = _transition_state(
+        daily_close=btc_close_s,
+        regime=regime,
+        regime_col=args.regime_col,
+        paper_start_ts=paper_start_ts,
+        entry_ts=btc_off_entry_ts,
+        hold_return=btc_off_hold_ret,
+        cfg=portfolio_cfg,
+    )
+    if not transition_momentum_enabled:
+        btc_transition["transition_multiplier"] = 1.0
+        btc_transition["transition_strength"] = "OFF"
+    btc_transition_multiplier = float(btc_transition.get("transition_multiplier", 1.0))
+    btc_off_scaled = btc_off_scaled * vol_multiplier * btc_transition_multiplier
     btc_def_scaled = float(btc_def_w) * float(def_scale_map.get(current_regime, 0.0))
-    btc_comb_w = float(min(1.0, max(0.0, btc_off_scaled + btc_def_scaled)))
+    btc_comb_w = float(min(gross_cap, max(0.0, btc_off_scaled + btc_def_scaled)))
 
     # 4) Live monitoring metrics
     rolling_30d_sharpe = np.nan
@@ -1473,6 +1663,17 @@ def _run() -> int:
     )
     print(f"Combined:   w={comb_w:.4f} | cap_bind_today={cap_bind_today}")
     print(
+        f"Vol filter: regime={vol_state.get('vol_regime', 'NA')} "
+        f"| pct={_fmt_pct(_safe_num(vol_state.get('vol_percentile', np.nan)), 0)} "
+        f"| mult={_fmt_num(_safe_num(vol_state.get('vol_multiplier', np.nan)), 2)}"
+    )
+    print(
+        f"Transition: ETH={eth_transition.get('transition_strength', 'NA')} "
+        f"x{_fmt_num(_safe_num(eth_transition.get('transition_multiplier', np.nan)), 2)} "
+        f"| BTC={btc_transition.get('transition_strength', 'NA')} "
+        f"x{_fmt_num(_safe_num(btc_transition.get('transition_multiplier', np.nan)), 2)}"
+    )
+    print(
         f"Gold paper: {'IN' if gold_position_active else 'FLAT'} | gate_flat_bear={gold_flat_bear_gate} "
         f"| ema_gate={gold_entry_threshold_met} | cond={gold_condition_met} | px={_fmt_num(gold_price, 2)} "
         f"| entry={gold_entry_ts if pd.notna(gold_entry_ts) else 'NA'} | ret={_fmt_pct(gold_return_since_entry, 2)} "
@@ -1623,7 +1824,20 @@ def _run() -> int:
         "def_signal_ts": str(def_signal_ts) if pd.notna(def_signal_ts) else "",
         "def_p_up": def_p_up,
         "combined_weight": comb_w,
-        "combined_weight_le_1": bool(np.isfinite(comb_w) and comb_w <= 1.0 + 1e-9),
+        "vol_regime": str(vol_state.get("vol_regime", "NA")),
+        "vol_percentile": _safe_num(vol_state.get("vol_percentile", np.nan)),
+        "vol_multiplier": _safe_num(vol_state.get("vol_multiplier", np.nan)),
+        "rolling_vol_20d": _safe_num(vol_state.get("rolling_vol_20d", np.nan)),
+        "transition_strength": str(eth_transition.get("transition_strength", "NA")),
+        "transition_multiplier": _safe_num(eth_transition.get("transition_multiplier", np.nan)),
+        "transition_return": _safe_num(eth_transition.get("transition_return", np.nan)),
+        "transition_flip_date": str(eth_transition.get("transition_flip_date", "")),
+        "btc_transition_strength": str(btc_transition.get("transition_strength", "NA")),
+        "btc_transition_multiplier": _safe_num(btc_transition.get("transition_multiplier", np.nan)),
+        "btc_transition_return": _safe_num(btc_transition.get("transition_return", np.nan)),
+        "btc_transition_flip_date": str(btc_transition.get("transition_flip_date", "")),
+        "portfolio_config": args.portfolio_config,
+        "combined_weight_le_1": bool(np.isfinite(comb_w) and comb_w <= gross_cap + 1e-9),
         "cap_bind_today": cap_bind_today,
         "rolling_30d_sharpe": rolling_30d_sharpe,
         "peak_dd": peak_dd,
@@ -1684,6 +1898,10 @@ def _run() -> int:
         "btc_funding_z": btc_funding_z,
         "btc_position": bool(btc_off_pos),
         "btc_combined_weight": btc_comb_w,
+        "vol_regime": str(vol_state.get("vol_regime", "NA")),
+        "vol_percentile": _safe_num(vol_state.get("vol_percentile", np.nan)),
+        "transition_strength": str(btc_transition.get("transition_strength", "NA")),
+        "transition_multiplier": _safe_num(btc_transition.get("transition_multiplier", np.nan)),
         "btc_off_entry_ts": str(btc_off_entry_ts) if pd.notna(btc_off_entry_ts) else "",
         "btc_off_days_held": btc_off_days_held,
         "btc_off_hold_return": btc_off_hold_ret,
@@ -1758,6 +1976,13 @@ def _run() -> int:
             "def_weight_raw": def_w,
             "def_weight_scaled": def_scaled,
             "combined_weight": comb_w,
+            "vol_regime": out_row["vol_regime"],
+            "vol_percentile": out_row["vol_percentile"],
+            "vol_multiplier": out_row["vol_multiplier"],
+            "transition_strength": out_row["transition_strength"],
+            "transition_multiplier": out_row["transition_multiplier"],
+            "btc_transition_strength": out_row["btc_transition_strength"],
+            "btc_transition_multiplier": out_row["btc_transition_multiplier"],
             "cum_strategy_ret": cum_strategy_ret,
             "cum_spot_ret": cum_spot_ret,
             "excess": excess,
