@@ -468,6 +468,29 @@ def _latest_market_lines(path: Path) -> list[str]:
     return lines
 
 
+def _trailing_false_days_from_log(log_path: Path, paper_start_ts: pd.Timestamp, today: str, current_value: bool) -> float:
+    rows: list[dict[str, object]] = [{"date": today, "stack_aligned": bool(current_value)}]
+    if log_path.exists():
+        try:
+            lg = pd.read_csv(log_path, usecols=["date", "stack_aligned"], low_memory=False)
+            lg["date_ts"] = pd.to_datetime(lg["date"], utc=True, errors="coerce").dt.floor("D")
+            lg = lg.dropna(subset=["date_ts"]).copy()
+            lg = lg[lg["date_ts"] >= paper_start_ts.floor("D")]
+            lg = lg[lg["date"].astype(str) != str(today)]
+            rows.extend(lg[["date", "stack_aligned"]].to_dict("records"))
+        except Exception:
+            pass
+    d = pd.DataFrame(rows)
+    if d.empty:
+        return np.nan
+    d["date_ts"] = pd.to_datetime(d["date"], utc=True, errors="coerce").dt.floor("D")
+    d = d.dropna(subset=["date_ts"]).sort_values("date_ts").drop_duplicates("date_ts", keep="last")
+    vals = d["stack_aligned"].astype(str).str.strip().str.lower().isin({"true", "1", "yes"})
+    if vals.iloc[-1]:
+        return 0.0
+    return float((~vals.iloc[::-1]).cumprod().sum())
+
+
 def _send_discord_summary(webhook_url: str, summary: dict[str, object], timeout_sec: float = 10.0) -> tuple[bool, str]:
     status = str(summary.get("status", "REVIEW"))
     color_map = {"PASS": 0x00FF00, "REVIEW": 0xFFA500, "STOP": 0xFF0000}
@@ -1728,6 +1751,9 @@ def _run() -> int:
 
     # Completed offensive trades log (execution-state closes).
     today = now.strftime("%Y-%m-%d")
+    log_counter = _trailing_false_days_from_log(out_dir / "daily_checks_log.csv", paper_start_ts, today, bool(stack_aligned))
+    if np.isfinite(log_counter):
+        off_days_since_break = log_counter
     completed_trades_path = Path(args.completed_trades_csv) if str(args.completed_trades_csv).strip() else (out_dir / "completed_trades.csv")
     completed_cols = [
         "entry_date",
