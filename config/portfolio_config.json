@@ -74,10 +74,10 @@
     },
     "extended": {
       "period": "2017-2024",
-      "sharpe": 1.554,
-      "cagr": 0.3382,
+      "sharpe": 1.491,
+      "cagr": 0.3227,
       "max_dd": -0.1587,
-      "note": "out-of-sample validation"
+      "note": "out-of-sample validation with yfinance gap-fill for missing Binance rows"
     },
     "crash_tests": {
       "2018": {
@@ -87,9 +87,10 @@
         "bear_fired_days_after_peak": 4
       },
       "2022": {
-        "eth_spot": -0.68,
-        "strategy": 0.0258,
-        "protected": true
+        "eth_spot": -0.6803,
+        "strategy": 0.0278,
+        "protected": true,
+        "ftx_position": "FLAT"
       }
     },
     "yearly": {
@@ -114,12 +115,12 @@
         "cagr": 0.4994
       },
       "2022": {
-        "sharpe": -0.241,
-        "cagr": 0.0258
+        "sharpe": -0.379,
+        "cagr": 0.0191
       },
       "2023": {
-        "sharpe": -0.11,
-        "cagr": 0.0377
+        "sharpe": 0.276,
+        "cagr": 0.0797
       },
       "2024": {
         "sharpe": 2.134,

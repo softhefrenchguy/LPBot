@@ -72,16 +72,25 @@ def _download_yf(ticker: str, start: str, end: str) -> pd.DataFrame:
 
 def _normalize_to_binance(yf_df: pd.DataFrame, binance_df: pd.DataFrame, merge_date: str) -> tuple[pd.DataFrame, float]:
     merge_ts = pd.to_datetime(merge_date, utc=True)
-    y = yf_df[yf_df["timestamp"] < merge_ts].copy()
-    b = binance_df[binance_df["timestamp"] >= merge_ts].copy()
-    if y.empty or b.empty:
-        raise RuntimeError("Cannot normalize: pre-merge or post-merge segment is empty")
-    y_last = float(y["close"].iloc[-1])
-    b_first = float(b["open"].iloc[0])
+    y_pre = yf_df[yf_df["timestamp"] < merge_ts].copy()
+    b_post = binance_df[binance_df["timestamp"] >= merge_ts].copy()
+    if y_pre.empty or b_post.empty:
+        raise RuntimeError("Cannot normalize: pre-merge yfinance or post-merge Binance segment is empty")
+    y_last = float(y_pre["close"].iloc[-1])
+    b_first = float(b_post["open"].iloc[0])
     factor = b_first / y_last if y_last > 0 else 1.0
+
+    # Scale the full yfinance history, not just pre-merge. This lets yfinance fill
+    # any Binance/local-data gaps, while Binance remains preferred where present.
+    y_scaled = yf_df.copy()
     for c in ["open", "high", "low", "close"]:
-        y[c] = y[c] * factor
-    out = pd.concat([y, b], ignore_index=True).sort_values("timestamp").drop_duplicates("timestamp", keep="last")
+        y_scaled[c] = y_scaled[c] * factor
+    y_scaled["source_rank"] = 0
+
+    b = binance_df.copy()
+    b["source_rank"] = 1
+    out = pd.concat([y_scaled, b], ignore_index=True).sort_values(["timestamp", "source_rank"])
+    out = out.drop_duplicates("timestamp", keep="last").drop(columns=["source_rank"], errors="ignore")
     return out.reset_index(drop=True), factor
 
 
