@@ -91,3 +91,33 @@ services:
       - ${BREAKOUT_REPORT_INTERVAL_SECONDS:-300}
     volumes:
       - ./artifacts:/app/artifacts
+
+  dashboard-api:
+    build: .
+    env_file:
+      - .env
+    restart: unless-stopped
+    command:
+      - uvicorn
+      - scripts.dashboard_api:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    ports:
+      - "${DASHBOARD_API_PORT:-8000}:8000"
+    volumes:
+      - ./data:/app/data
+      - ./artifacts:/app/artifacts
+      - ./scripts:/app/scripts
+      - ./dashboard:/app/dashboard
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${DASHBOARD_PORT:-3000}:3000"
+    depends_on:
+      - dashboard-api

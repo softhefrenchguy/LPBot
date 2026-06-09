@@ -6,3 +6,5 @@ scikit-learn
 plotly>=5.0.0
 python-dotenv
 krakenex
+fastapi
+uvicorn[standard]

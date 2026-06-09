@@ -35,6 +35,13 @@ reminders/
 *.joblib
 *.pkl
 *.pickle
+!dashboard/**/*.json
+!dashboard/**/*.js
+!dashboard/**/*.jsx
+!dashboard/**/*.css
+!dashboard/**/*.html
+!dashboard/**/*.conf
+!dashboard/Dockerfile
 
 # Keep documentation and examples trackable
 !.env.example
