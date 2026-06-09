@@ -93,7 +93,8 @@ def build_extended_data(start: str, end: str, merge_date: str) -> tuple[pd.DataF
     eth_ext, eth_factor = _normalize_to_binance(eth_yf, eth_binance, merge_date)
     btc_ext, btc_factor = _normalize_to_binance(btc_yf, btc_binance, merge_date)
     eth_ext = eth_ext[(eth_ext["timestamp"] >= pd.to_datetime(start, utc=True)) & (eth_ext["timestamp"] <= pd.to_datetime(end, utc=True))]
-    btc_ext = btc_ext[(btc_ext["timestamp"] >= pd.to_datetime(start, utc=True)) & (btc_ext["timestamp"] <= pd.to_datetime(end, utc=True))]
+    # Keep the full BTC-USD history from 2015 in the saved file; the backtest loader filters to --start.
+    btc_ext = btc_ext[(btc_ext["timestamp"] >= pd.Timestamp("2015-01-01", tz="UTC")) & (btc_ext["timestamp"] <= pd.to_datetime(end, utc=True))]
     Path("data").mkdir(exist_ok=True)
     eth_ext.to_csv("data/eth_daily_extended.csv", index=False)
     btc_ext.to_csv("data/btc_daily_extended.csv", index=False)
