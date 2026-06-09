@@ -17,6 +17,31 @@ from backtest_btc_full_stack import (
 )
 
 
+def _load_daily_price_csv(path: Path, start: str, end: str) -> pd.DataFrame:
+    d = pd.read_csv(path)
+    ts_col = next((c for c in ["timestamp", "date", "day", "datetime", "Date"] if c in d.columns), None)
+    if ts_col is None:
+        raise ValueError(f"{path} must contain a timestamp/date column.")
+    d["timestamp"] = pd.to_datetime(d[ts_col], utc=True, errors="coerce")
+    rename = {c: c.lower() for c in d.columns if str(c).lower() in {"open", "high", "low", "close", "volume"}}
+    d = d.rename(columns=rename)
+    required = {"timestamp", "open", "high", "low", "close"}
+    missing = required - set(d.columns)
+    if missing:
+        raise ValueError(f"{path} missing required columns: {sorted(missing)}")
+    for col in ["open", "high", "low", "close", "volume"]:
+        if col in d.columns:
+            d[col] = pd.to_numeric(d[col], errors="coerce")
+    if "volume" not in d.columns:
+        d["volume"] = 0.0
+    d = d.dropna(subset=["timestamp", "open", "high", "low", "close"])
+    d = d.sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last")
+    start_ts = pd.to_datetime(start, utc=True)
+    end_ts = pd.to_datetime(end, utc=True) + pd.Timedelta(days=1)
+    d = d[(d["timestamp"] >= start_ts) & (d["timestamp"] < end_ts)].copy()
+    return d[["timestamp", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
+
+
 def _download_gold_daily(start: str, end: str, symbol: str) -> tuple[pd.DataFrame, str]:
     tickers = [symbol]
     if symbol.upper() != "GLD":
@@ -474,10 +499,11 @@ def run_sleeve(
     secondary_confirm: pd.DataFrame | None = None,
     cross_confirm_variant: str = "off",
     regime_override: pd.DataFrame | None = None,
+    price_data: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    d = _download_binance_daily(symbol=symbol, start=start, end=end)
+    d = price_data.copy() if price_data is not None else _download_binance_daily(symbol=symbol, start=start, end=end)
     if d.empty:
-        raise RuntimeError(f"No data downloaded for {symbol}")
+        raise RuntimeError(f"No price data available for {symbol}")
     out_price_csv.parent.mkdir(parents=True, exist_ok=True)
     d.to_csv(out_price_csv, index=False)
 
@@ -628,6 +654,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="ETH+BTC parallel sleeve portfolio backtest (lag-1 realistic)")
     ap.add_argument("--start", default="2019-01-01")
     ap.add_argument("--end", default="2024-12-31")
+    ap.add_argument("--eth-data", default="", help="Optional local ETH daily OHLCV CSV.")
+    ap.add_argument("--btc-data", default="", help="Optional local BTC daily OHLCV CSV.")
     ap.add_argument("--eth-symbol", default="ETHUSDC")
     ap.add_argument("--btc-symbol", default="BTCUSDC")
     ap.add_argument("--eth-confirm-days", type=int, default=3)
@@ -674,6 +702,8 @@ def main() -> int:
         regime_override = _load_external_regime(Path(args.hmm_regime_csv))
 
     def_proxy = load_eth_defensive_proxy(Path(args.eth_defensive_csv), Path(args.eth_perp_csv), bool(args.pup_fallback))
+    eth_price_data = _load_daily_price_csv(Path(args.eth_data), args.start, args.end) if str(args.eth_data).strip() else None
+    btc_price_data = _load_daily_price_csv(Path(args.btc_data), args.start, args.end) if str(args.btc_data).strip() else None
     eth_secondary = None
     btc_secondary = None
     if str(args.cross_confirm) in {"strict", "loose", "one-way"}:
@@ -699,6 +729,7 @@ def main() -> int:
         secondary_confirm=eth_secondary,
         cross_confirm_variant=str(args.cross_confirm),
         regime_override=regime_override,
+        price_data=eth_price_data,
     )
     btc = run_sleeve(
         symbol=args.btc_symbol,
@@ -717,6 +748,7 @@ def main() -> int:
         secondary_confirm=btc_secondary,
         cross_confirm_variant=str(args.cross_confirm),
         regime_override=regime_override,
+        price_data=btc_price_data,
     )
 
     keep = [
