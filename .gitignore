@@ -1,32 +1,61 @@
-# data and artifacts
-data/
-regimes/
-results/
-outputs/
+# Secrets
+.env
+.env.*
+!.env.example
 
-# csvs
-**/*.csv
+# Local IDE / OS state
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
 
-# python
+# Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-.env
+.pytest_cache/
+.mypy_cache/
 .venv/
+venv/
 
-# notebooks
+# Generated data, artifacts, models, logs
+data/
+artifacts/
+regimes/
+results/
+outputs/
+models/
+logs/
+ec2_backup/
+reminders/
+
+# Generated file types
+**/*.csv
+**/*.html
+**/*.jsonl
+*.joblib
+*.pkl
+*.pickle
+
+# Keep dashboard source trackable despite generated-file ignores
+!dashboard/**/*.json
+!dashboard/**/*.js
+!dashboard/**/*.jsx
+!dashboard/**/*.css
+!dashboard/**/*.html
+!dashboard/**/*.conf
+!dashboard/Dockerfile
+
+# Keep documentation and examples trackable
+!.env.example
+!docs/**/*.md
+
+# Notebooks are local research unless explicitly exported to docs
 *.ipynb
 
-# logs
+# Root scratch outputs
 download_log.txt
 download_err.txt
-
-# local-only folders
-lpbot/data_sources/
-models/
-
-# os/editor noise
-.DS_Store
-Thumbs.db
-.vscode/
+v2_last2w.csv
+v2_last2w.html
