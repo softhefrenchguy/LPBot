@@ -63,5 +63,24 @@
       "max_dd": -0.1465,
       "source": "artifacts/backtest/overlay_strategy_summary_2019_2024_ema_h_asym.csv"
     }
+  },
+  "validated_backtest": {
+    "period": "2019-2024",
+    "sharpe": 1.657,
+    "cagr": 0.3726,
+    "max_dd": -0.1465,
+    "ann_vol": 0.15,
+    "cost_bps": 20,
+    "last_updated": "2026-06-09",
+    "components": [
+      "eth_ema_21_55_144",
+      "btc_ema_15_40_120",
+      "signal_weighted_allocation",
+      "vol_filter",
+      "transition_momentum",
+      "asymmetric_conviction",
+      "meanrev_chop_overlay",
+      "paxg_gold_reserve"
+    ]
   }
 }
