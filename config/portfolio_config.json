@@ -65,22 +65,66 @@
     }
   },
   "validated_backtest": {
-    "period": "2019-2024",
-    "sharpe": 1.657,
-    "cagr": 0.3726,
-    "max_dd": -0.1465,
-    "ann_vol": 0.15,
-    "cost_bps": 20,
-    "last_updated": "2026-06-09",
-    "components": [
-      "eth_ema_21_55_144",
-      "btc_ema_15_40_120",
-      "signal_weighted_allocation",
-      "vol_filter",
-      "transition_momentum",
-      "asymmetric_conviction",
-      "meanrev_chop_overlay",
-      "paxg_gold_reserve"
-    ]
+    "primary": {
+      "period": "2019-2024",
+      "sharpe": 1.657,
+      "cagr": 0.3726,
+      "max_dd": -0.1465,
+      "note": "core validated period"
+    },
+    "extended": {
+      "period": "2017-2024",
+      "sharpe": 1.554,
+      "cagr": 0.3382,
+      "max_dd": -0.1587,
+      "note": "out-of-sample validation"
+    },
+    "crash_tests": {
+      "2018": {
+        "eth_spot": -0.8235,
+        "strategy": 0.0666,
+        "protected": true,
+        "bear_fired_days_after_peak": 4
+      },
+      "2022": {
+        "eth_spot": -0.68,
+        "strategy": 0.0258,
+        "protected": true
+      }
+    },
+    "yearly": {
+      "2017": {
+        "sharpe": 4.537,
+        "cagr": 3.787
+      },
+      "2018": {
+        "sharpe": -0.024,
+        "cagr": 0.0466
+      },
+      "2019": {
+        "sharpe": 1.214,
+        "cagr": 0.2737
+      },
+      "2020": {
+        "sharpe": 2.818,
+        "cagr": 0.8187
+      },
+      "2021": {
+        "sharpe": 1.772,
+        "cagr": 0.4994
+      },
+      "2022": {
+        "sharpe": -0.241,
+        "cagr": 0.0258
+      },
+      "2023": {
+        "sharpe": -0.11,
+        "cagr": 0.0377
+      },
+      "2024": {
+        "sharpe": 2.134,
+        "cagr": 0.4695
+      }
+    }
   }
 }
