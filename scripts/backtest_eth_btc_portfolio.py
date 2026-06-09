@@ -161,6 +161,25 @@ def _sp500_macro_frame(start: str, end: str, out_csv: Path) -> pd.DataFrame:
     return s[["day", "sp_regime", "macro_multiplier"]].copy()
 
 
+def _load_external_regime(path: Path) -> pd.DataFrame:
+    d = pd.read_csv(path)
+    day_col = "day" if "day" in d.columns else "date" if "date" in d.columns else "timestamp"
+    regime_col = None
+    for col in ["regime_v2", "hmm_regime", "regime", "label"]:
+        if col in d.columns:
+            regime_col = col
+            break
+    if regime_col is None:
+        raise ValueError(f"{path} must contain a regime column.")
+    d["day"] = pd.to_datetime(d[day_col], utc=True, errors="coerce").dt.floor("D")
+    d["regime_override"] = d[regime_col].astype(str).str.upper()
+    d = d[d["regime_override"].isin(["BULL", "CHOP", "BEAR"])]
+    d = d.dropna(subset=["day"]).sort_values("day").drop_duplicates(subset=["day"], keep="last")
+    if d.empty:
+        raise ValueError(f"{path} did not contain any usable BULL/CHOP/BEAR regimes.")
+    return d[["day", "regime_override"]].copy()
+
+
 def _eth_vol_frame(eth_daily: pd.DataFrame) -> pd.DataFrame:
     v = eth_daily[["day", "close"]].copy()
     ret = v["close"].pct_change()
@@ -454,6 +473,7 @@ def run_sleeve(
     ema_spans: tuple[int, int, int] = (21, 55, 144),
     secondary_confirm: pd.DataFrame | None = None,
     cross_confirm_variant: str = "off",
+    regime_override: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     d = _download_binance_daily(symbol=symbol, start=start, end=end)
     if d.empty:
@@ -463,6 +483,10 @@ def run_sleeve(
 
     d["day"] = d["timestamp"].dt.floor("D")
     d = classify_regime_v2_on_btc(d)
+    if regime_override is not None and not regime_override.empty:
+        d = d.merge(regime_override, on="day", how="left")
+        d["regime_v2"] = d["regime_override"].ffill().fillna(d["regime_v2"])
+        d = d.drop(columns=["regime_override"], errors="ignore")
 
     e1, e2, e3 = ema_spans
     d["ema21"] = d["close"].ewm(span=e1, adjust=False).mean()
@@ -632,6 +656,8 @@ def main() -> int:
     ap.add_argument("--gold-symbol", default="PAXG-USD")
     ap.add_argument("--gold-cap", type=float, default=0.3)
     ap.add_argument("--gold-cost-bps", type=float, default=10.0)
+    ap.add_argument("--regime-source", choices=["ema", "hmm"], default="ema")
+    ap.add_argument("--hmm-regime-csv", default="")
     ap.add_argument("--eth-defensive-csv", default="artifacts/backtest/direction_event_model_v1_flat_defensive_6y_gapfilled.csv")
     ap.add_argument("--eth-perp-csv", default="data/backtest/ETH_perp_features_5m_6y_gapfilled.csv")
     ap.add_argument("--out-summary-csv", default="artifacts/backtest/eth_btc_portfolio_summary.csv")
@@ -640,6 +666,12 @@ def main() -> int:
 
     if bool(args.ema_grid) or bool(args.round2_suite):
         return run_round2_suite(args)
+
+    regime_override = None
+    if str(args.regime_source) == "hmm":
+        if not str(args.hmm_regime_csv).strip():
+            raise SystemExit("--hmm-regime-csv is required when --regime-source hmm")
+        regime_override = _load_external_regime(Path(args.hmm_regime_csv))
 
     def_proxy = load_eth_defensive_proxy(Path(args.eth_defensive_csv), Path(args.eth_perp_csv), bool(args.pup_fallback))
     eth_secondary = None
@@ -666,6 +698,7 @@ def main() -> int:
         ema_spans=tuple(args.eth_ema),
         secondary_confirm=eth_secondary,
         cross_confirm_variant=str(args.cross_confirm),
+        regime_override=regime_override,
     )
     btc = run_sleeve(
         symbol=args.btc_symbol,
@@ -683,6 +716,7 @@ def main() -> int:
         ema_spans=tuple(args.btc_ema),
         secondary_confirm=btc_secondary,
         cross_confirm_variant=str(args.cross_confirm),
+        regime_override=regime_override,
     )
 
     keep = [
@@ -994,6 +1028,8 @@ def main() -> int:
                 "include_gold": bool(args.include_gold),
                 "gold_symbol": str(merged["gold_symbol_used"].iloc[-1]) if bool(args.include_gold) else "",
                 "gold_cap": float(args.gold_cap),
+                "regime_source": str(args.regime_source),
+                "hmm_regime_csv": str(args.hmm_regime_csv),
                 "combined_cagr": m_comb["cagr"],
                 "combined_sharpe": m_comb["sharpe"],
                 "combined_max_dd": m_comb["max_dd"],
