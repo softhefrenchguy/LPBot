@@ -144,6 +144,7 @@ def _status_from_row(row: pd.Series) -> dict[str, Any]:
         "peak_dd": _float(row, "portfolio_peak_dd", "peak_dd"),
         "eth_spot": _float(row, "eth_sleeve_spot_ret", "cum_spot_ret"),
         "btc_spot": _float(row, "btc_sleeve_spot_ret"),
+        "basket_spot": _float(row, "portfolio_spot_ret"),
         "ema21": _float(row, "ema21"),
         "ema55": _float(row, "ema55"),
         "ema144": _float(row, "ema144"),

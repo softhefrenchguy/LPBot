@@ -95,16 +95,20 @@ function Header({ status, error }) {
 function EquityChart({ data }) {
   const chartData = useMemo(() => data.map(d => ({
     date: d.date,
-    Strategy: (Number(d.strategy_ret) || 0) * 100,
-    ETH: (Number(d.eth_spot) || 0) * 100,
-    Basket: (Number(d.combined) || 0) * 100,
+    'LPBot Strategy': (Number(d.strategy_ret) || 0) * 100,
+    'ETH Spot': (Number(d.eth_spot) || 0) * 100,
+    '50/50 Basket': (Number(d.combined) || 0) * 100,
   })), [data])
 
   return (
     <section className="glass rounded-[2rem] p-5">
-      <div className="mb-4 flex items-center justify-between">
+      <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <h2 className="font-display text-xl font-semibold">Equity Curve</h2>
-        <span className="text-sm text-emerald-100/45">Strategy vs ETH spot vs 50/50 basket</span>
+        <div className="flex flex-wrap gap-3 text-sm text-emerald-100/65">
+          <span><span className="mr-2 inline-block h-2 w-5 rounded-full bg-[#60a5fa]" />LPBot Strategy</span>
+          <span><span className="mr-2 inline-block h-2 w-5 rounded-full bg-[#fb923c]" />ETH Spot</span>
+          <span><span className="mr-2 inline-block h-2 w-5 rounded-full border border-[#94a3b8]" />50/50 Basket</span>
+        </div>
       </div>
       <div className="h-80">
         <ResponsiveContainer width="100%" height="100%">
@@ -113,11 +117,67 @@ function EquityChart({ data }) {
             <XAxis dataKey="date" stroke="#7f968d" tick={{ fontSize: 11 }} />
             <YAxis stroke="#7f968d" tickFormatter={(v) => `${v.toFixed(0)}%`} tick={{ fontSize: 11 }} />
             <Tooltip contentStyle={{ background: '#0f1b18', border: '1px solid #20352f', borderRadius: 16 }} formatter={(v) => `${Number(v).toFixed(2)}%`} />
-            <Line type="monotone" dataKey="Strategy" stroke="#60a5fa" strokeWidth={3} dot={false} />
-            <Line type="monotone" dataKey="ETH" stroke="#fb923c" strokeWidth={2} dot={false} />
-            <Line type="monotone" dataKey="Basket" stroke="#94a3b8" strokeWidth={2} strokeDasharray="6 6" dot={false} />
+            <Line type="monotone" dataKey="LPBot Strategy" stroke="#60a5fa" strokeWidth={3} dot={false} />
+            <Line type="monotone" dataKey="ETH Spot" stroke="#fb923c" strokeWidth={2} dot={false} />
+            <Line type="monotone" dataKey="50/50 Basket" stroke="#94a3b8" strokeWidth={2} strokeDasharray="6 6" dot={false} />
           </LineChart>
         </ResponsiveContainer>
+      </div>
+    </section>
+  )
+}
+
+function BenchmarksPanel({ status, performance, trades }) {
+  const strategy = Number(status?.strategy_return) || 0
+  const eth = Number(status?.eth_spot) || 0
+  const btc = Number(status?.btc_spot) || 0
+  const basket = Number(status?.basket_spot) || (strategy - (Number(status?.excess) || 0))
+  const rows = [
+    ['Strategy', strategy, null],
+    ['ETH spot', eth, strategy - eth],
+    ['BTC spot', btc, strategy - btc],
+    ['50/50 basket', basket, strategy - basket],
+  ]
+  const daily = useMemo(() => {
+    const vals = (performance || []).map((d) => Number(d.strategy_ret) || 0)
+    return vals.slice(1).map((v, i) => ((1 + v) / Math.max(1e-9, 1 + vals[i])) - 1).filter(Number.isFinite)
+  }, [performance])
+  const mean = daily.reduce((a, b) => a + b, 0) / Math.max(1, daily.length)
+  const variance = daily.reduce((a, b) => a + ((b - mean) ** 2), 0) / Math.max(1, daily.length - 1)
+  const annVol = Math.sqrt(Math.max(0, variance)) * Math.sqrt(365)
+  const wins = trades.filter(t => Number(t.return_pct) > 0).length
+  const losses = trades.filter(t => Number(t.return_pct) <= 0).length
+  const winRate = trades.length ? wins / trades.length : 0
+
+  return (
+    <section className="glass rounded-[2rem] p-5">
+      <div className="mb-4">
+        <h2 className="font-display text-xl font-semibold">Strategy vs Benchmarks</h2>
+        <p className="text-sm text-emerald-100/45">Since Mar 21</p>
+      </div>
+      <div className="grid gap-6 lg:grid-cols-[1.4fr_1fr]">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead className="text-emerald-100/45"><tr><th className="py-2">Benchmark</th><th>Return</th><th>vs Strategy</th></tr></thead>
+            <tbody>{rows.map(([label, ret, diff]) => (
+              <tr key={label} className="border-t border-line/80">
+                <td className="py-3 font-semibold">{label}</td>
+                <td className={returnClass(ret)}>{pct(ret)}</td>
+                <td className={diff === null ? 'text-emerald-100/35' : 'text-mint'}>{diff === null ? '-' : pct(diff)}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+        <div className="rounded-2xl border border-line bg-white/[0.02] p-4">
+          <h3 className="mb-3 font-display text-lg font-semibold">Risk Metrics</h3>
+          <div className="grid grid-cols-2 gap-3 text-sm">
+            <Info label="Peak DD" value={pct(status?.peak_dd)} className="text-amber" />
+            <Info label="Ann Vol" value={pct(annVol)} />
+            <Info label="Days live" value={status?.days_live ?? '--'} />
+            <Info label="Trades" value={trades.length} />
+            <Info label="Win rate" value={`${pct(winRate, 0)} (${wins} wins, ${losses} losses)`} span />
+          </div>
+        </div>
       </div>
     </section>
   )
@@ -161,7 +221,7 @@ function MarketsTable({ markets }) {
               <td>{usd(m.price, asset.includes('DXY') ? 1 : 2)}</td>
               <td className={returnClass(m.pct)}>{pct(m.pct, 1)}</td>
               <td><span className={`rounded-full px-2 py-1 ${regimeClass(m.regime)}`}>{m.regime}</span></td>
-              <td>{m.stack_aligned ? <span className="text-mint">? stack aligned</span> : <span className="text-emerald-100/35">--</span>}</td>
+              <td>{m.stack_aligned ? <span className="text-mint">↑ stack aligned</span> : <span className="text-emerald-100/35">--</span>}</td>
             </tr>
           ))}</tbody>
         </table>
@@ -221,6 +281,7 @@ function App() {
         <MetricCard title="Capital Deployed" value={pct(status?.capital_deployed, 0)} subtitle="current deployment" icon={CircleDollarSign} tone={Number(status?.capital_deployed) > 0 ? 'green' : 'neutral'} />
       </section>
       <div className="mb-6"><EquityChart data={performance} /></div>
+      <div className="mb-6"><BenchmarksPanel status={status || {}} performance={performance} trades={trades} /></div>
       <section className="mb-6 grid gap-4 lg:grid-cols-2"><AssetCard name="ETH" status={status || {}} /><AssetCard name="BTC" status={status || {}} btc /></section>
       <div className="mb-6"><MarketsTable markets={markets} /></div>
       <section className="mb-6 grid gap-4 lg:grid-cols-2"><Trades trades={trades} /><NewsFeed news={news} /></section>
