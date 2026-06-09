@@ -535,6 +535,21 @@ def _latest_news_row(path: Path) -> dict[str, object]:
     return row if isinstance(row, dict) else {}
 
 
+def _latest_dvol_row(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    try:
+        d = pd.read_csv(path, low_memory=False)
+    except Exception:
+        return {}
+    if d.empty:
+        return {}
+    if "date" in d.columns:
+        d = d.sort_values("date")
+    row = d.iloc[-1].to_dict()
+    return row if isinstance(row, dict) else {}
+
+
 def _latest_market_lines(path: Path) -> list[str]:
     if not path.exists():
         return []
@@ -670,6 +685,17 @@ def _send_discord_summary(webhook_url: str, summary: dict[str, object], timeout_
         f"Exit signal: {'YES' if bool(summary.get('mean_reversion_exit_signal', False)) else 'NO'}",
         f"Days held: {summary.get('mean_reversion_days_held', 0)}",
     ]
+    dvol_iv = _safe_num(summary.get("dvol_atm_iv_30d", np.nan))
+    dvol_pct = _safe_num(summary.get("dvol_iv_percentile", np.nan))
+    dvol_slope = _safe_num(summary.get("dvol_term_slope", np.nan))
+    dvol_slope_label = "inverted" if np.isfinite(dvol_slope) and dvol_slope < 0 else ("normal" if np.isfinite(dvol_slope) else "NA")
+    options_vol_lines = [
+        f"ATM IV (30d): {_fmt_pct(dvol_iv / 100.0 if dvol_iv > 5 else dvol_iv, 1)}",
+        f"IV pct: {_fmt_pct(dvol_pct, 0)} | Regime: {summary.get('dvol_options_vol_regime', 'NA')}",
+        f"Term slope: {_fmt_num(dvol_slope, 1)} ({dvol_slope_label})",
+        f"vs Realised: {summary.get('dvol_agreement', 'NA')}",
+        f"Note: LOG ONLY ({summary.get('dvol_history_days', 0)}/30 days history)",
+    ]
     btc_signal_lines = [
         f"BTC: ${_fmt_num(_safe_num(summary.get('btc_price', np.nan)), 0)} ({_fmt_pct(_safe_num(summary.get('btc_24h_pct', np.nan)), 1)})",
         f"EMA15/40/120: {_fmt_num(_safe_num(summary.get('btc_ema15', summary.get('btc_ema21', np.nan))), 2)} / {_fmt_num(_safe_num(summary.get('btc_ema40', summary.get('btc_ema55', np.nan))), 2)} / {_fmt_num(_safe_num(summary.get('btc_ema120', summary.get('btc_ema144', np.nan))), 2)}",
@@ -693,7 +719,7 @@ def _send_discord_summary(webhook_url: str, summary: dict[str, object], timeout_
         f"Excess vs 50/50 basket: {_fmt_pct(_safe_num(summary.get('portfolio_excess_vs_basket', summary.get('excess', np.nan))), 2)}",
         f"Peak DD: {_fmt_pct(_safe_num(summary.get('portfolio_peak_dd', summary.get('peak_dd', np.nan))), 2)}",
     ]
-    news_lines = [str(summary.get("news_alert_line", "📰 News: No major macro events"))]
+    news_lines = [str(summary.get("news_alert_line", "News: No major macro events"))]
     health_lines = [
         f"Status: **{status}**",
         str(summary.get("flags_text", "No flags")),
@@ -718,6 +744,7 @@ def _send_discord_summary(webhook_url: str, summary: dict[str, object], timeout_
         {"name": "BTC Signal", "value": "\n".join(btc_signal_lines), "inline": False},
         {"name": "Gold Sleeve (Paper)", "value": "\n".join(gold_lines), "inline": False},
         {"name": "Mean-Reversion Overlay", "value": "\n".join(mean_rev_lines), "inline": False},
+        {"name": "Options Vol (Log Only)", "value": "\n".join(options_vol_lines), "inline": False},
         {"name": "Performance (paper)", "value": "\n".join(perf_lines), "inline": False},
         {"name": "News", "value": "\n".join(news_lines), "inline": False},
         {"name": "Health", "value": "\n".join(health_lines), "inline": False},
@@ -909,6 +936,7 @@ def _run() -> int:
     p.add_argument("--gold-notional-gbp", type=float, default=10000.0)
     p.add_argument("--gold-state-json", default="artifacts/paper_trade/gold_sleeve_state.json")
     p.add_argument("--news-log-csv", default="artifacts/news/news_log.csv")
+    p.add_argument("--dvol-log-csv", default="artifacts/options/dvol_log.csv")
     p.add_argument("--market-log-csv", default="artifacts/markets/market_tracker.csv")
     p.add_argument(
         "--paper-start-date",
@@ -1896,9 +1924,10 @@ def _run() -> int:
         news_summary = str(news_row.get("summary", "No major macro events") or "No major macro events")
     if news_major_event:
         affected_txt = news_affected.replace("|", ", ") if news_affected else "broad markets"
-        news_alert_line = f"⚠️ NEWS ALERT: {news_summary}\nAffected: {affected_txt} | {news_direction}"
+        news_alert_line = f"NEWS ALERT: {news_summary}\nAffected: {affected_txt} | {news_direction}"
     else:
-        news_alert_line = "📰 News: No major macro events"
+        news_alert_line = "News: No major macro events"
+    dvol_row = _latest_dvol_row(Path(args.dvol_log_csv))
 
     if np.isfinite(rolling_30d_sharpe) and rolling_30d_sharpe < float(args.stop_rolling_sharpe):
         stops.append("rolling_30d_sharpe_below_stop")
@@ -2173,6 +2202,14 @@ def _run() -> int:
         "news_direction": news_direction,
         "news_summary": news_summary,
         "news_alert_line": news_alert_line,
+        "dvol_atm_iv_30d": _safe_num(dvol_row.get("atm_iv_30d", np.nan)),
+        "dvol_iv_percentile": _safe_num(dvol_row.get("iv_percentile", np.nan)),
+        "dvol_options_vol_regime": str(dvol_row.get("options_vol_regime", "NA")),
+        "dvol_rv_vol_regime": str(dvol_row.get("rv_vol_regime", "NA")),
+        "dvol_agreement": str(dvol_row.get("agreement", "NA")),
+        "dvol_term_slope": _safe_num(dvol_row.get("term_slope", np.nan)),
+        "dvol_history_days": int(_safe_num(dvol_row.get("history_days", 0))) if np.isfinite(_safe_num(dvol_row.get("history_days", 0))) else 0,
+        "dvol_insufficient_history": bool(dvol_row.get("insufficient_history", True)) if dvol_row else True,
         "markets_count": int(len(markets_lines)),
         "off_position": off_pos,
         "off_weight": off_w,
