@@ -10,7 +10,6 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { Activity, AlertTriangle, CircleDollarSign, Radio, ShieldCheck, Zap } from 'lucide-react'
 import './index.css'
 
 const API_BASE = import.meta.env.VITE_API_BASE || `${window.location.protocol}//${window.location.hostname}:8000`
@@ -57,20 +56,6 @@ function useDashboardData() {
   }, [])
 
   return { status, performance, trades, markets, news, error }
-}
-
-function MetricCard({ title, value, subtitle, icon: Icon, tone = 'neutral' }) {
-  const color = tone === 'green' ? 'text-mint' : tone === 'red' ? 'text-danger' : tone === 'amber' ? 'text-amber' : 'text-white'
-  return (
-    <div className="glass rounded-3xl p-5">
-      <div className="flex items-center justify-between text-sm text-emerald-100/60">
-        <span>{title}</span>
-        <Icon size={18} className="text-emerald-100/50" />
-      </div>
-      <div className={`mt-4 font-display text-4xl font-bold ${color}`}>{value}</div>
-      <div className="mt-1 text-sm text-emerald-100/45">{subtitle}</div>
-    </div>
-  )
 }
 
 function Header({ status, error }) {
@@ -274,12 +259,6 @@ function App() {
     <main className="mx-auto max-w-7xl px-4 py-6 md:px-8">
       <Header status={status} error={error} />
       {error && <div className="mb-6 rounded-2xl border border-danger/30 bg-danger/10 p-4 text-danger">API error: {error}</div>}
-      <section className="mb-6 grid gap-4 md:grid-cols-4">
-        <MetricCard title="Strategy Return" value={pct(status?.strategy_return)} subtitle="since Mar 21" icon={Activity} tone={Number(status?.strategy_return) >= 0 ? 'green' : 'red'} />
-        <MetricCard title="vs Basket" value={pct(status?.excess)} subtitle="excess return" icon={Zap} tone={Number(status?.excess) >= 0 ? 'green' : 'red'} />
-        <MetricCard title="Peak DD" value={pct(status?.peak_dd)} subtitle="max drawdown" icon={ShieldCheck} tone="amber" />
-        <MetricCard title="Capital Deployed" value={pct(status?.capital_deployed, 0)} subtitle="current deployment" icon={CircleDollarSign} tone={Number(status?.capital_deployed) > 0 ? 'green' : 'neutral'} />
-      </section>
       <div className="mb-6"><EquityChart data={performance} /></div>
       <div className="mb-6"><BenchmarksPanel status={status || {}} performance={performance} trades={trades} /></div>
       <section className="mb-6 grid gap-4 lg:grid-cols-2"><AssetCard name="ETH" status={status || {}} /><AssetCard name="BTC" status={status || {}} btc /></section>
