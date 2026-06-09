@@ -39,6 +39,13 @@
   "gold_reserve": true,
   "gold_symbol": "PAXG",
   "gold_cap": 0.3,
+  "mean_reversion_overlay_enabled": true,
+  "mean_reversion_lookback": 20,
+  "mean_reversion_z_entry": -1.5,
+  "mean_reversion_z_exit": -0.5,
+  "mean_reversion_daily_ret_entry": -0.03,
+  "mean_reversion_max_hold_days": 10,
+  "mean_reversion_state_json": "artifacts/paper_trade/mean_reversion_overlay_state.json",
   "validated_reference": {
     "period": "2019-2024",
     "cost_bps": 20,
@@ -49,6 +56,12 @@
     "sharpe": 1.626,
     "cagr": 0.3524,
     "max_dd": -0.1587,
-    "ann_vol": 0.1631
+    "ann_vol": 0.1631,
+    "mean_reversion_overlay": {
+      "sharpe": 1.657,
+      "cagr": 0.3726,
+      "max_dd": -0.1465,
+      "source": "artifacts/backtest/overlay_strategy_summary_2019_2024_ema_h_asym.csv"
+    }
   }
 }

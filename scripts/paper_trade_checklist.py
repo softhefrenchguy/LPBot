@@ -412,6 +412,113 @@ def _transition_state(
     return out
 
 
+def _mean_reversion_overlay_state(
+    daily_close: pd.Series,
+    regime: str,
+    base_weight: float,
+    gross_cap: float,
+    cfg: dict[str, object],
+    now: pd.Timestamp,
+) -> dict[str, object]:
+    enabled = _cfg_bool(cfg, "mean_reversion_overlay_enabled", False)
+    out = {
+        "enabled": bool(enabled),
+        "active": False,
+        "weight": 0.0,
+        "remaining_cap": max(0.0, float(gross_cap) - max(0.0, float(base_weight) if np.isfinite(base_weight) else 0.0)),
+        "z_score": np.nan,
+        "daily_ret": np.nan,
+        "entry_signal": False,
+        "exit_signal": False,
+        "days_held": 0,
+        "entry_date": "",
+        "exit_reason": "",
+    }
+    if not enabled:
+        return out
+
+    lookback = max(5, _cfg_int(cfg, "mean_reversion_lookback", 20))
+    z_entry = _cfg_float(cfg, "mean_reversion_z_entry", -1.5)
+    z_exit = _cfg_float(cfg, "mean_reversion_z_exit", -0.5)
+    ret_entry = _cfg_float(cfg, "mean_reversion_daily_ret_entry", -0.03)
+    max_hold = max(1, _cfg_int(cfg, "mean_reversion_max_hold_days", 10))
+    state_path = Path(str(cfg.get("mean_reversion_state_json", "artifacts/paper_trade/mean_reversion_overlay_state.json")))
+
+    state = _load_json_state(state_path)
+    active = bool(state.get("active", False))
+    entry_ts = pd.to_datetime(state.get("entry_ts", ""), utc=True, errors="coerce")
+    days_held = int(_safe_num(state.get("days_held", 0))) if np.isfinite(_safe_num(state.get("days_held", 0))) else 0
+
+    c = daily_close.dropna().astype(float).sort_index()
+    if len(c) >= max(lookback, 2):
+        latest = float(c.iloc[-1])
+        mu = float(c.rolling(lookback, min_periods=lookback).mean().iloc[-1])
+        sd = float(c.rolling(lookback, min_periods=lookback).std(ddof=0).iloc[-1])
+        if np.isfinite(mu) and np.isfinite(sd) and sd > 0:
+            out["z_score"] = float((latest - mu) / sd)
+        if len(c) >= 2 and float(c.iloc[-2]) > 0:
+            out["daily_ret"] = float(c.iloc[-1] / c.iloc[-2] - 1.0)
+
+    if active:
+        days_held += 1
+
+    is_chop = str(regime).upper() == "CHOP"
+    z = _safe_num(out["z_score"])
+    r = _safe_num(out["daily_ret"])
+    entry_signal = bool((not active) and is_chop and np.isfinite(z) and np.isfinite(r) and z < z_entry and r < ret_entry)
+    exit_reason = ""
+    exit_signal = False
+    if active:
+        if not is_chop:
+            exit_signal = True
+            exit_reason = "REGIME_NOT_CHOP"
+        elif np.isfinite(z) and z > z_exit:
+            exit_signal = True
+            exit_reason = "Z_RECOVERY"
+        elif days_held >= max_hold:
+            exit_signal = True
+            exit_reason = "MAX_HOLD"
+
+    if entry_signal:
+        active = True
+        days_held = 1
+        entry_ts = now.floor("D")
+        exit_reason = ""
+    elif exit_signal:
+        active = False
+        days_held = 0
+        entry_ts = pd.NaT
+
+    remaining = max(0.0, float(gross_cap) - max(0.0, float(base_weight) if np.isfinite(base_weight) else 0.0))
+    weight = remaining if active and is_chop else 0.0
+    _save_json_state(
+        state_path,
+        {
+            "active": bool(active),
+            "entry_ts": str(entry_ts) if pd.notna(entry_ts) else "",
+            "days_held": int(days_held),
+            "last_z_score": float(z) if np.isfinite(z) else None,
+            "last_daily_ret": float(r) if np.isfinite(r) else None,
+            "last_weight": float(weight),
+            "last_exit_reason": exit_reason,
+            "updated_utc": str(now),
+        },
+    )
+    out.update(
+        {
+            "active": bool(active),
+            "weight": float(weight),
+            "remaining_cap": float(remaining),
+            "entry_signal": bool(entry_signal),
+            "exit_signal": bool(exit_signal),
+            "days_held": int(days_held),
+            "entry_date": str(entry_ts.date()) if pd.notna(entry_ts) else "",
+            "exit_reason": exit_reason,
+        }
+    )
+    return out
+
+
 def _latest_news_row(path: Path) -> dict[str, object]:
     if not path.exists():
         return {}
@@ -518,7 +625,8 @@ def _send_discord_summary(webhook_url: str, summary: dict[str, object], timeout_
     state_lines = [
         f"Offensive: {'LONG' if bool(summary.get('off_position', False)) else 'FLAT'}",
         f"Defensive: {'ACTIVE' if bool(summary.get('def_position', False)) else 'FLAT'}",
-        f"Capital deployed: {_fmt_pct(_safe_num(summary.get('combined_weight', np.nan)), 0)}",
+        f"Base ETH weight: {_fmt_pct(_safe_num(summary.get('combined_weight', np.nan)), 0)}",
+        f"ETH execution weight: {_fmt_pct(_safe_num(summary.get('eth_execution_weight', summary.get('combined_weight', np.nan))), 0)}",
         f"Off contribution (scaled): {_fmt_num(off_w_scaled, 4)}",
         f"Def contribution (scaled): {_fmt_num(def_w_scaled, 4)}",
         f"Vol regime: {summary.get('vol_regime', 'NA')} ({_fmt_pct(_safe_num(summary.get('vol_percentile', np.nan)), 0)} pctile)",
@@ -550,6 +658,17 @@ def _send_discord_summary(webhook_url: str, summary: dict[str, object], timeout_
         f"Condition met: {'YES' if bool(summary.get('gold_condition_met', False)) else 'NO'}",
         f"Paper sleeve: {'ACTIVE' if bool(summary.get('gold_position_active', False)) else 'FLAT'}",
         f"Paper return: {_fmt_pct(_safe_num(summary.get('gold_paper_return', np.nan)), 2)} | P&L: GBP {_fmt_num(_safe_num(summary.get('gold_paper_pnl_gbp', np.nan)), 2)}",
+    ]
+    mean_rev_lines = [
+        f"Enabled: {'YES' if bool(summary.get('mean_reversion_enabled', False)) else 'NO'}",
+        f"Status: {'ACTIVE' if bool(summary.get('mean_reversion_active', False)) else 'FLAT'}",
+        f"Weight: {_fmt_pct(_safe_num(summary.get('mean_reversion_weight', np.nan)), 0)}",
+        f"Remaining cap: {_fmt_pct(_safe_num(summary.get('mean_reversion_remaining_cap', np.nan)), 0)}",
+        f"Z-score: {_fmt_num(_safe_num(summary.get('mean_reversion_z_score', np.nan)), 2)}",
+        f"Daily ret: {_fmt_pct(_safe_num(summary.get('mean_reversion_daily_ret', np.nan)), 2)}",
+        f"Entry signal: {'YES' if bool(summary.get('mean_reversion_entry_signal', False)) else 'NO'}",
+        f"Exit signal: {'YES' if bool(summary.get('mean_reversion_exit_signal', False)) else 'NO'}",
+        f"Days held: {summary.get('mean_reversion_days_held', 0)}",
     ]
     btc_signal_lines = [
         f"BTC: ${_fmt_num(_safe_num(summary.get('btc_price', np.nan)), 0)} ({_fmt_pct(_safe_num(summary.get('btc_24h_pct', np.nan)), 1)})",
@@ -598,6 +717,7 @@ def _send_discord_summary(webhook_url: str, summary: dict[str, object], timeout_
         {"name": "Defensive Signal", "value": "\n".join(def_gate_lines), "inline": False},
         {"name": "BTC Signal", "value": "\n".join(btc_signal_lines), "inline": False},
         {"name": "Gold Sleeve (Paper)", "value": "\n".join(gold_lines), "inline": False},
+        {"name": "Mean-Reversion Overlay", "value": "\n".join(mean_rev_lines), "inline": False},
         {"name": "Performance (paper)", "value": "\n".join(perf_lines), "inline": False},
         {"name": "News", "value": "\n".join(news_lines), "inline": False},
         {"name": "Health", "value": "\n".join(health_lines), "inline": False},
@@ -1513,6 +1633,19 @@ def _run() -> int:
     # btc_off_w/raw signal is zero, displayed and executable BTC weight must be zero.
     btc_comb_w = float(min(gross_cap, max(0.0, btc_off_scaled)))
 
+    mean_reversion_overlay = _mean_reversion_overlay_state(
+        daily_close=daily_close,
+        regime=current_regime,
+        base_weight=comb_w,
+        gross_cap=gross_cap,
+        cfg=portfolio_cfg,
+        now=now,
+    )
+    mean_reversion_weight = _safe_num(mean_reversion_overlay.get("weight", 0.0))
+    if not np.isfinite(mean_reversion_weight):
+        mean_reversion_weight = 0.0
+    eth_execution_weight = float(min(gross_cap, max(0.0, (comb_w if np.isfinite(comb_w) else 0.0) + mean_reversion_weight)))
+
     # 4) Live monitoring metrics
     rolling_30d_sharpe = np.nan
     peak_dd = 0.0
@@ -1677,7 +1810,33 @@ def _run() -> int:
                     .fillna(0.0)
                     .clip(lower=0.0, upper=1.0)
                 )
+                mr_w = pd.Series(0.0, index=e_w.index)
+                if _cfg_bool(portfolio_cfg, "mean_reversion_overlay_enabled", False):
+                    try:
+                        lg_mr = pd.read_csv(live_log_path, usecols=["date", "mean_reversion_weight"])
+                        lg_mr["day"] = pd.to_datetime(lg_mr["date"], utc=True, errors="coerce").dt.floor("D")
+                        lg_mr["mean_reversion_weight"] = pd.to_numeric(lg_mr["mean_reversion_weight"], errors="coerce")
+                        lg_mr = lg_mr.dropna(subset=["day"]).sort_values("day")
+                    except Exception:
+                        lg_mr = pd.DataFrame(columns=["day", "mean_reversion_weight"])
+                    lg_mr = pd.concat(
+                        [
+                            lg_mr[["day", "mean_reversion_weight"]],
+                            pd.DataFrame([{"day": now.floor("D"), "mean_reversion_weight": float(mean_reversion_weight)}]),
+                        ],
+                        ignore_index=True,
+                    )
+                    lg_mr = lg_mr.sort_values("day").drop_duplicates(subset=["day"], keep="last")
+                    mr_w = (
+                        lg_mr.set_index("day")["mean_reversion_weight"]
+                        .reindex(idx)
+                        .astype(float)
+                        .ffill()
+                        .fillna(0.0)
+                        .clip(lower=0.0, upper=1.0)
+                    )
                 eth_strat_daily = e_w.shift(1).fillna(0.0) * eth_spot_daily
+                eth_strat_daily = eth_strat_daily + mr_w.shift(1).fillna(0.0) * eth_spot_daily
 
                 sleeve_eth_cap = float(max(0.0, args.eth_sleeve_capital))
                 sleeve_btc_cap = float(max(0.0, args.btc_sleeve_capital))
@@ -1712,7 +1871,7 @@ def _run() -> int:
 
             live_execution_dry_run = os.getenv("LIVE_TRADING_ENABLED", "").strip().lower() != "true"
             live_execution_report = execute_strategy_signal(
-                eth_target_weight=float(comb_w) if np.isfinite(comb_w) else 0.0,
+                eth_target_weight=float(eth_execution_weight) if np.isfinite(eth_execution_weight) else 0.0,
                 btc_target_weight=float(btc_comb_w) if np.isfinite(btc_comb_w) else 0.0,
                 total_capital_usd=None,
                 dry_run=live_execution_dry_run,
@@ -2042,6 +2201,18 @@ def _run() -> int:
         "def_signal_ts": str(def_signal_ts) if pd.notna(def_signal_ts) else "",
         "def_p_up": def_p_up,
         "combined_weight": comb_w,
+        "eth_execution_weight": eth_execution_weight,
+        "mean_reversion_enabled": bool(mean_reversion_overlay.get("enabled", False)),
+        "mean_reversion_active": bool(mean_reversion_overlay.get("active", False)),
+        "mean_reversion_weight": mean_reversion_weight,
+        "mean_reversion_remaining_cap": _safe_num(mean_reversion_overlay.get("remaining_cap", np.nan)),
+        "mean_reversion_z_score": _safe_num(mean_reversion_overlay.get("z_score", np.nan)),
+        "mean_reversion_daily_ret": _safe_num(mean_reversion_overlay.get("daily_ret", np.nan)),
+        "mean_reversion_entry_signal": bool(mean_reversion_overlay.get("entry_signal", False)),
+        "mean_reversion_exit_signal": bool(mean_reversion_overlay.get("exit_signal", False)),
+        "mean_reversion_days_held": int(_safe_num(mean_reversion_overlay.get("days_held", 0))) if np.isfinite(_safe_num(mean_reversion_overlay.get("days_held", 0))) else 0,
+        "mean_reversion_entry_date": str(mean_reversion_overlay.get("entry_date", "")),
+        "mean_reversion_exit_reason": str(mean_reversion_overlay.get("exit_reason", "")),
         "vol_regime": str(vol_state.get("vol_regime", "NA")),
         "vol_percentile": _safe_num(vol_state.get("vol_percentile", np.nan)),
         "vol_multiplier": _safe_num(vol_state.get("vol_multiplier", np.nan)),
@@ -2220,6 +2391,17 @@ def _run() -> int:
             "def_weight_raw": def_w,
             "def_weight_scaled": def_scaled,
             "combined_weight": comb_w,
+            "eth_execution_weight": eth_execution_weight,
+            "mean_reversion_enabled": out_row["mean_reversion_enabled"],
+            "mean_reversion_active": out_row["mean_reversion_active"],
+            "mean_reversion_weight": out_row["mean_reversion_weight"],
+            "mean_reversion_remaining_cap": out_row["mean_reversion_remaining_cap"],
+            "mean_reversion_z_score": out_row["mean_reversion_z_score"],
+            "mean_reversion_daily_ret": out_row["mean_reversion_daily_ret"],
+            "mean_reversion_entry_signal": out_row["mean_reversion_entry_signal"],
+            "mean_reversion_exit_signal": out_row["mean_reversion_exit_signal"],
+            "mean_reversion_days_held": out_row["mean_reversion_days_held"],
+            "mean_reversion_exit_reason": out_row["mean_reversion_exit_reason"],
             "vol_regime": out_row["vol_regime"],
             "vol_percentile": out_row["vol_percentile"],
             "vol_multiplier": out_row["vol_multiplier"],
