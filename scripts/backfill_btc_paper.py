@@ -151,7 +151,7 @@ def _build_btc_backfill(
     pos_s = pd.Series(pos_vals, index=regime_s.index).astype(int)
     b_off_raw = pos_s.astype(float) * b_vs
 
-    # BTC funding z and defensive.
+    # BTC funding z is diagnostic only; it must not create BTC exposure by itself.
     btc_perp = pd.read_csv(btc_perp_csv, low_memory=False) if btc_perp_csv.exists() else pd.DataFrame()
     btc_funding_z_s = pd.Series(index=regime_s.index, dtype=float)
     btc_def_raw = pd.Series(0.0, index=regime_s.index, dtype=float)
@@ -194,7 +194,7 @@ def _build_btc_backfill(
     conv_score_s = pd.Series(conv_score_vals, index=regime_s.index, dtype=float)
     b_off_scaled = b_off_raw * reg_scale_off * conv_mult_s
     b_def_scaled = btc_def_raw * reg_scale_def
-    b_weight = (b_off_scaled + b_def_scaled).clip(0.0, 1.0)
+    b_weight = b_off_scaled.clip(0.0, 1.0)
 
     btc_spot_r = btc_close_s.pct_change().fillna(0.0)
     btc_strat_r = b_weight.shift(1).fillna(0.0) * btc_spot_r

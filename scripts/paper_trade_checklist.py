@@ -1355,7 +1355,8 @@ def _run() -> int:
         },
     )
 
-    # 3c) BTC sleeve (paper): offensive EMA + funding-based defensive overlay, capped by router.
+    # 3c) BTC sleeve (paper): offensive EMA sleeve.
+    # Funding is reported as a diagnostic only; it must not create BTC exposure by itself.
     btc_price = np.nan
     btc_24h_pct = np.nan
     btc_ema21 = np.nan
@@ -1508,7 +1509,9 @@ def _run() -> int:
     )
     btc_off_scaled = btc_off_scaled * float(btc_conviction.get("conviction_multiplier", 1.0))
     btc_def_scaled = float(btc_def_w) * float(def_scale_map.get(current_regime, 0.0))
-    btc_comb_w = float(min(gross_cap, max(0.0, btc_off_scaled + btc_def_scaled)))
+    # Deployed BTC weight is the final offensive signal only. In particular, when
+    # btc_off_w/raw signal is zero, displayed and executable BTC weight must be zero.
+    btc_comb_w = float(min(gross_cap, max(0.0, btc_off_scaled)))
 
     # 4) Live monitoring metrics
     rolling_30d_sharpe = np.nan
