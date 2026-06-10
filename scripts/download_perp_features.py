@@ -161,6 +161,7 @@ def main():
     p.add_argument("--days", type=int, default=90)
     p.add_argument("--out", default="data/backtest/ETH_perp_features_5m.csv")
     p.add_argument("--cache-dir", default="data/backtest/.cache_perp_features", help="Cache raw downloaded legs so reruns resume quickly.")
+    p.add_argument("--refresh-cache", action="store_true", help="Ignore cached raw legs and redownload the requested live window.")
     args = p.parse_args()
 
     end = pd.Timestamp.now(tz="UTC").floor(_binance_interval_to_pandas_freq(args.interval))
@@ -174,7 +175,7 @@ def main():
     funding_cache = cache_dir / f"{cache_key}_funding.csv"
     oi_cache = cache_dir / f"{cache_key}_oi.csv"
 
-    if spot_cache.exists():
+    if spot_cache.exists() and not args.refresh_cache:
         spot = pd.read_csv(spot_cache)
         spot["timestamp"] = pd.to_datetime(spot["timestamp"], utc=True, errors="coerce")
         spot = spot.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
@@ -185,7 +186,7 @@ def main():
         spot.to_csv(spot_cache, index=False)
         print(f"spot rows={len(spot)} (cached: {spot_cache})")
 
-    if perp_cache.exists():
+    if perp_cache.exists() and not args.refresh_cache:
         perp = pd.read_csv(perp_cache)
         perp["timestamp"] = pd.to_datetime(perp["timestamp"], utc=True, errors="coerce")
         perp = perp.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
@@ -196,7 +197,7 @@ def main():
         perp.to_csv(perp_cache, index=False)
         print(f"perp rows={len(perp)} (cached: {perp_cache})")
 
-    if funding_cache.exists():
+    if funding_cache.exists() and not args.refresh_cache:
         funding = pd.read_csv(funding_cache)
         funding["timestamp"] = pd.to_datetime(funding["timestamp"], utc=True, errors="coerce")
         funding = funding.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
@@ -207,7 +208,7 @@ def main():
         funding.to_csv(funding_cache, index=False)
         print(f"funding rows={len(funding)} (cached: {funding_cache})")
 
-    if oi_cache.exists():
+    if oi_cache.exists() and not args.refresh_cache:
         oi = pd.read_csv(oi_cache)
         oi["timestamp"] = pd.to_datetime(oi["timestamp"], utc=True, errors="coerce")
         oi = oi.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
