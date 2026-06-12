@@ -9,6 +9,7 @@ services:
       - ./artifacts:/app/artifacts
       - ./logs:/app/logs
       - ./scripts:/app/scripts
+      - ./config:/app/config
     healthcheck:
       test: ["CMD-SHELL", "test -f /tmp/heartbeat.txt && [ $$(( $$(date +%s) - $$(cat /tmp/heartbeat.txt) )) -lt 180 ]"]
       interval: 60s
@@ -72,6 +73,7 @@ services:
       - ./artifacts:/app/artifacts
       - ./logs:/app/logs
       - ./scripts:/app/scripts
+      - ./config:/app/config
 
   breakout-report:
     build: .
@@ -111,6 +113,7 @@ services:
       - ./artifacts:/app/artifacts
       - ./scripts:/app/scripts
       - ./dashboard:/app/dashboard
+      - ./config:/app/config
 
   dashboard:
     build:
