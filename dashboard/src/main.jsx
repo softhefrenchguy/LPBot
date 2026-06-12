@@ -241,12 +241,15 @@ function NewsFeed({ news }) {
 }
 
 function GoldCard({ status }) {
+  const goldFast = status?.gold_ema_fast ?? 21
+  const goldMid = status?.gold_ema_mid ?? 55
+  const goldSlow = status?.gold_ema_slow ?? 144
   return (
     <section className="glass rounded-[2rem] p-5">
       <h2 className="mb-4 font-display text-xl font-semibold">Gold Sleeve Status</h2>
       <div className="grid gap-3 text-sm md:grid-cols-4">
         <Info label="PAXG" value={`${usd(status?.gold_price, 2)} (${pct(status?.gold_24h_pct, 1)})`} />
-        <Info label="EMA21/55/144" value={`${num(status?.gold_ema21,0)} / ${num(status?.gold_ema55,0)} / ${num(status?.gold_ema144,0)}`} span />
+        <Info label={`EMA${goldFast}/${goldMid}/${goldSlow}`} value={`${num(status?.gold_ema21,0)} / ${num(status?.gold_ema55,0)} / ${num(status?.gold_ema144,0)}`} span />
         <Info label="Gate" value={status?.gold_flat_bear_gate ? 'OPEN' : 'CLOSED'} className={status?.gold_flat_bear_gate ? 'text-mint' : 'text-emerald-100/45'} />
         <Info label="Condition" value={status?.gold_condition_met ? 'YES' : 'NO'} className={status?.gold_condition_met ? 'text-mint' : 'text-danger'} />
       </div>

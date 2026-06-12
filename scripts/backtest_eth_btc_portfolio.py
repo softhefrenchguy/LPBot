@@ -682,6 +682,7 @@ def main() -> int:
     ap.add_argument("--eth-5m-csv", default="data/ETHUSDC_5m.csv")
     ap.add_argument("--include-gold", action="store_true")
     ap.add_argument("--gold-symbol", default="PAXG-USD")
+    ap.add_argument("--gold-ema", type=_parse_ema_spans, default=(21, 55, 144))
     ap.add_argument("--gold-cap", type=float, default=0.3)
     ap.add_argument("--gold-cost-bps", type=float, default=10.0)
     ap.add_argument("--regime-source", choices=["ema", "hmm"], default="ema")
@@ -950,9 +951,10 @@ def main() -> int:
         g = g.merge(gold_px, on="day", how="left").sort_values("day")
         g["open"] = g["open"].ffill()
         g["close"] = g["close"].ffill()
-        g["gold_ema21"] = g["close"].ewm(span=21, adjust=False).mean()
-        g["gold_ema55"] = g["close"].ewm(span=55, adjust=False).mean()
-        g["gold_ema144"] = g["close"].ewm(span=144, adjust=False).mean()
+        ge1, ge2, ge3 = tuple(args.gold_ema)
+        g["gold_ema21"] = g["close"].ewm(span=ge1, adjust=False).mean()
+        g["gold_ema55"] = g["close"].ewm(span=ge2, adjust=False).mean()
+        g["gold_ema144"] = g["close"].ewm(span=ge3, adjust=False).mean()
         g["gold_aligned"] = (g["gold_ema21"] > g["gold_ema55"]) & (g["gold_ema55"] > g["gold_ema144"])
         g["gold_ret_exec"] = g["open"].pct_change().fillna(0.0)
 
@@ -1059,6 +1061,7 @@ def main() -> int:
                 "intraday_timing": bool(args.intraday_timing),
                 "include_gold": bool(args.include_gold),
                 "gold_symbol": str(merged["gold_symbol_used"].iloc[-1]) if bool(args.include_gold) else "",
+                "gold_ema": "/".join(str(x) for x in tuple(args.gold_ema)) if bool(args.include_gold) else "",
                 "gold_cap": float(args.gold_cap),
                 "regime_source": str(args.regime_source),
                 "hmm_regime_csv": str(args.hmm_regime_csv),

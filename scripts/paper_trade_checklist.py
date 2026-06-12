@@ -668,9 +668,12 @@ def _send_discord_summary(webhook_url: str, summary: dict[str, object], timeout_
         f"Raw signal: {_fmt_num(def_w_raw, 4)}",
         f"Scaled weight: {_fmt_num(def_w_scaled, 4)}",
     ]
+    gold_ema_fast = summary.get("gold_ema_fast", 21)
+    gold_ema_mid = summary.get("gold_ema_mid", 55)
+    gold_ema_slow = summary.get("gold_ema_slow", 144)
     gold_lines = [
         f"PAXG: ${_fmt_num(_safe_num(summary.get('gold_price', np.nan)), 2)} ({_fmt_pct(_safe_num(summary.get('gold_24h_pct', np.nan)), 2)})",
-        f"EMA21/55/144: {_fmt_num(_safe_num(summary.get('gold_ema21', np.nan)), 2)} / {_fmt_num(_safe_num(summary.get('gold_ema55', np.nan)), 2)} / {_fmt_num(_safe_num(summary.get('gold_ema144', np.nan)), 2)}",
+        f"EMA{gold_ema_fast}/{gold_ema_mid}/{gold_ema_slow}: {_fmt_num(_safe_num(summary.get('gold_ema21', np.nan)), 2)} / {_fmt_num(_safe_num(summary.get('gold_ema55', np.nan)), 2)} / {_fmt_num(_safe_num(summary.get('gold_ema144', np.nan)), 2)}",
         f"EMA gate: {'YES' if bool(summary.get('gold_entry_threshold_met', False)) else 'NO'}",
         f"Flat+BEAR gate: {'YES' if bool(summary.get('gold_flat_bear_gate', False)) else 'NO'}",
         f"Condition met: {'YES' if bool(summary.get('gold_condition_met', False)) else 'NO'}",
@@ -969,6 +972,12 @@ def _run() -> int:
         )
         args.off_ema_fast, args.off_ema_mid, args.off_ema_slow = eth_ema
         args.btc_ema_fast, args.btc_ema_mid, args.btc_ema_slow = btc_ema
+        gold_ema = _cfg_int_list(
+            portfolio_cfg,
+            "gold_ema",
+            [int(args.gold_ema_fast), int(args.gold_ema_mid), int(args.gold_ema_slow)],
+        )
+        args.gold_ema_fast, args.gold_ema_mid, args.gold_ema_slow = gold_ema
 
     now = pd.Timestamp.now("UTC")
     out_dir = Path(args.out_dir)
@@ -2187,6 +2196,9 @@ def _run() -> int:
         "gold_symbol": args.gold_symbol,
         "gold_price_csv": args.gold_price_csv,
         "gold_state_json": args.gold_state_json,
+        "gold_ema_fast": int(args.gold_ema_fast),
+        "gold_ema_mid": int(args.gold_ema_mid),
+        "gold_ema_slow": int(args.gold_ema_slow),
         "gold_price": gold_price,
         "gold_24h_pct": gold_24h_pct,
         "gold_price_ts": str(gold_signal_ts) if pd.notna(gold_signal_ts) else "",
