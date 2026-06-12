@@ -51,8 +51,8 @@ if [[ "$REFRESH_DEFENSE_BEFORE_CHECK" == "1" ]]; then
   if [[ -x "$REPO_ROOT/scripts/run_defensive_live_refresh.sh" ]]; then
     echo "Refreshing defensive live artifact..." | tee -a "$LOG_DIR/paper_check_cron.log"
     set +e
-    "$REPO_ROOT/scripts/run_defensive_live_refresh.sh" 2>&1 | tee -a "$LOG_DIR/paper_check_cron.log"
-    def_refresh_rc=${PIPESTATUS[0]}
+    "$REPO_ROOT/scripts/run_defensive_live_refresh.sh" >> "$LOG_DIR/paper_check_cron.log" 2>&1
+    def_refresh_rc=$?
     set -e
     if [[ "$def_refresh_rc" -ne 0 ]]; then
       echo "WARNING: defensive live refresh failed (exit=$def_refresh_rc); using previous defensive artifact" \
