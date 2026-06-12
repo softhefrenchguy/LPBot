@@ -169,6 +169,7 @@ function BenchmarksPanel({ status, performance, trades }) {
 }
 
 function AssetCard({ name, status, btc = false }) {
+  const ethEmaLabel = `EMA${status?.eth_ema_fast || 21}/${status?.eth_ema_mid || 55}/${status?.eth_ema_slow || 144}`
   return (
     <div className="glass rounded-[2rem] p-5">
       <div className="flex items-start justify-between">
@@ -178,7 +179,7 @@ function AssetCard({ name, status, btc = false }) {
       <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
         <Info label="Price" value={usd(btc ? status?.btc_price : status?.eth_price)} />
         <Info label="24h" value={pct(btc ? status?.btc_24h_pct : status?.eth_24h_pct, 1)} className={returnClass(btc ? status?.btc_24h_pct : status?.eth_24h_pct)} />
-        <Info label={btc ? 'EMA15/40/120' : 'EMA21/55/144'} value={btc ? `${num(status?.btc_ema15,0)} / ${num(status?.btc_ema40,0)} / ${num(status?.btc_ema120,0)}` : `${num(status?.ema21,0)} / ${num(status?.ema55,0)} / ${num(status?.ema144,0)}`} span />
+        <Info label={btc ? 'EMA15/40/120' : ethEmaLabel} value={btc ? `${num(status?.btc_ema15,0)} / ${num(status?.btc_ema40,0)} / ${num(status?.btc_ema120,0)}` : `${num(status?.ema21,0)} / ${num(status?.ema55,0)} / ${num(status?.ema144,0)}`} span />
         <Info label="Stack aligned" value={(btc ? status?.btc_stack_aligned : status?.stack_aligned) ? 'YES' : 'NO'} />
         <Info label="Weight" value={pct(btc ? status?.btc_weight : status?.eth_weight, 0)} />
         {!btc && <Info label="Vol regime" value={`${status?.vol_regime || 'NA'} (${pct(status?.vol_percentile,0)})`} />}

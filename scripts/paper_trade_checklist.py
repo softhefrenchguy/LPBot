@@ -648,9 +648,12 @@ def _send_discord_summary(webhook_url: str, summary: dict[str, object], timeout_
         f"Transition: {summary.get('transition_strength', 'NA')} x{_fmt_num(_safe_num(summary.get('transition_multiplier', np.nan)), 2)}",
         f"ETH conviction: {summary.get('conviction_bucket', 'NA')} ({_fmt_num(_safe_num(summary.get('conviction_score', np.nan)), 2)} score)",
     ]
+    eth_ema_fast = summary.get("eth_ema_fast", 21)
+    eth_ema_mid = summary.get("eth_ema_mid", 55)
+    eth_ema_slow = summary.get("eth_ema_slow", 144)
     off_gate_lines = [
-        f"EMA21/55/144: {_fmt_num(_safe_num(summary.get('ema21', np.nan)), 2)} / {_fmt_num(_safe_num(summary.get('ema55', np.nan)), 2)} / {_fmt_num(_safe_num(summary.get('ema144', np.nan)), 2)}",
-        f"Stack aligned (21>55>144): {'YES' if bool(summary.get('stack_aligned', False)) else 'NO'}",
+        f"EMA{eth_ema_fast}/{eth_ema_mid}/{eth_ema_slow}: {_fmt_num(_safe_num(summary.get('ema21', np.nan)), 2)} / {_fmt_num(_safe_num(summary.get('ema55', np.nan)), 2)} / {_fmt_num(_safe_num(summary.get('ema144', np.nan)), 2)}",
+        f"Stack aligned ({eth_ema_fast}>{eth_ema_mid}>{eth_ema_slow}): {'YES' if bool(summary.get('stack_aligned', False)) else 'NO'}",
         f"Days aligned: {summary.get('stack_aligned_days', 'NA')}",
         f"Days since break: {summary.get('off_days_since_break', 'NA')}",
         f"Entry threshold met: {'YES' if bool(summary.get('entry_threshold_met', False)) else 'NO'}",
@@ -1081,9 +1084,9 @@ def _run() -> int:
             stack_aligned_days = int(rev_stack.cumprod().sum()) if len(rev_stack) else np.nan
             entry_threshold_met = bool(stack_confirm.iloc[-1]) if len(stack_confirm) else False
             if ema21 > ema55 > ema144:
-                ema_state = "bullish_21>55>144"
+                ema_state = f"bullish_{int(args.off_ema_fast)}>{int(args.off_ema_mid)}>{int(args.off_ema_slow)}"
             elif ema21 < ema55 < ema144:
-                ema_state = "bearish_21<55<144"
+                ema_state = f"bearish_{int(args.off_ema_fast)}<{int(args.off_ema_mid)}<{int(args.off_ema_slow)}"
             else:
                 ema_state = "mixed"
 
@@ -2028,7 +2031,12 @@ def _run() -> int:
     print(f"Data:       {'PASS' if (price_fresh and funding_fresh and (not np.isfinite(gap_count) or gap_count == 0)) else 'WARN'} | "
           f"price_age_h={price_age_h:.2f} funding_age_h={funding_age_h:.2f} gap_count_48h={gap_count if np.isfinite(gap_count) else 'NA'}")
     print(f"Regime:     {current_regime} (streak {int(regime_days) if np.isfinite(regime_days) else 'NA'}d)")
-    print(f"EMA state:  {ema_state} | ema21={ema21:.2f} ema55={ema55:.2f} ema144={ema144:.2f}")
+    print(
+        f"EMA state:  {ema_state} | "
+        f"ema{int(args.off_ema_fast)}={ema21:.2f} "
+        f"ema{int(args.off_ema_mid)}={ema55:.2f} "
+        f"ema{int(args.off_ema_slow)}={ema144:.2f}"
+    )
     print(
         f"Off gate:   stack_aligned={stack_aligned} aligned_days={int(stack_aligned_days) if np.isfinite(stack_aligned_days) else 'NA'} "
         f"entry_threshold_met={entry_threshold_met} days_since_break={int(off_days_since_break) if np.isfinite(off_days_since_break) else 'NA'}"
@@ -2139,6 +2147,9 @@ def _run() -> int:
         "regime": current_regime,
         "regime_days": regime_days,
         "ema_state": ema_state,
+        "eth_ema_fast": int(args.off_ema_fast),
+        "eth_ema_mid": int(args.off_ema_mid),
+        "eth_ema_slow": int(args.off_ema_slow),
         "ema21": ema21,
         "ema55": ema55,
         "ema144": ema144,
@@ -2481,6 +2492,9 @@ def _run() -> int:
             "flags_text": out_row["flags_text"],
             "paper_start_date": out_row["paper_start_date"],
             "days_live": out_row["days_live"],
+            "eth_ema_fast": out_row["eth_ema_fast"],
+            "eth_ema_mid": out_row["eth_ema_mid"],
+            "eth_ema_slow": out_row["eth_ema_slow"],
             "ema21": ema21,
             "ema55": ema55,
             "ema144": ema144,
