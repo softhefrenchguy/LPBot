@@ -163,6 +163,14 @@ def _status_from_row(row: pd.Series) -> dict[str, Any]:
         "gold_flat_bear_gate": _bool(row, "gold_flat_bear_gate"),
         "gold_condition_met": _bool(row, "gold_condition_met"),
         "gold_position_active": _bool(row, "gold_position_active"),
+        "dvol_atm_iv_30d": _float(row, "dvol_atm_iv_30d", default=float("nan")),
+        "dvol_iv_percentile": _float(row, "dvol_iv_percentile", default=float("nan")),
+        "dvol_options_vol_regime": _str(row, "dvol_options_vol_regime", default="NA"),
+        "dvol_rv_vol_regime": _str(row, "dvol_rv_vol_regime", default="NA"),
+        "dvol_agreement": _str(row, "dvol_agreement", default="NA"),
+        "dvol_term_slope": _float(row, "dvol_term_slope", default=float("nan")),
+        "dvol_history_days": int(_float(row, "dvol_history_days", default=0)),
+        "dvol_insufficient_history": _bool(row, "dvol_insufficient_history", default=True),
     }
 
 

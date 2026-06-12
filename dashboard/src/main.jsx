@@ -253,6 +253,33 @@ function GoldCard({ status }) {
   )
 }
 
+function OptionsVolCard({ status }) {
+  const atmIv = Number(status?.dvol_atm_iv_30d)
+  const ivPct = Number(status?.dvol_iv_percentile)
+  const termSlope = Number(status?.dvol_term_slope)
+  const historyDays = Number(status?.dvol_history_days) || 0
+  const hasIv = Number.isFinite(atmIv)
+  const hasPct = Number.isFinite(ivPct)
+  const hasSlope = Number.isFinite(termSlope)
+  const insufficient = Boolean(status?.dvol_insufficient_history)
+
+  return (
+    <section className="glass rounded-[2rem] p-5">
+      <h2 className="mb-4 font-display text-xl font-semibold">Options Vol Signal</h2>
+      <div className="grid gap-3 text-sm md:grid-cols-4">
+        <Info label="ATM IV 30d" value={hasIv ? `${atmIv.toFixed(1)}%` : 'NA'} />
+        <Info label="IV percentile" value={hasPct ? pct(ivPct, 0) : 'Building'} />
+        <Info label="Options regime" value={status?.dvol_options_vol_regime || 'NA'} />
+        <Info label="RV regime" value={status?.dvol_rv_vol_regime || 'NA'} />
+        <Info label="Term slope" value={hasSlope ? `${termSlope.toFixed(1)} vol pts` : 'NA'} className={hasSlope && termSlope < 0 ? 'text-amber' : ''} />
+        <Info label="Agreement" value={status?.dvol_agreement || 'NA'} />
+        <Info label="History" value={`${historyDays}/30 days`} />
+        <Info label="Mode" value={insufficient ? 'LOG ONLY' : 'READY'} className={insufficient ? 'text-amber' : 'text-mint'} />
+      </div>
+    </section>
+  )
+}
+
 function App() {
   const { status, performance, trades, markets, news, error } = useDashboardData()
   return (
@@ -264,7 +291,7 @@ function App() {
       <section className="mb-6 grid gap-4 lg:grid-cols-2"><AssetCard name="ETH" status={status || {}} /><AssetCard name="BTC" status={status || {}} btc /></section>
       <div className="mb-6"><MarketsTable markets={markets} /></div>
       <section className="mb-6 grid gap-4 lg:grid-cols-2"><Trades trades={trades} /><NewsFeed news={news} /></section>
-      <GoldCard status={status || {}} />
+      <section className="grid gap-4 lg:grid-cols-2"><GoldCard status={status || {}} /><OptionsVolCard status={status || {}} /></section>
     </main>
   )
 }
