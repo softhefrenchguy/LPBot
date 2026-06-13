@@ -36,20 +36,21 @@ mkdir -p "$LOG_DIR" "$REPO_ROOT/artifacts/paper_trade"
 echo "=== Paper Trade Check $TS ===" | tee -a "$LOG_DIR/paper_check_cron.log"
 
 # Refresh ETH price input used by the checklist. This is intentionally
-# lightweight: merge recent 1m klines, then rebuild the 5m file.
+# lightweight enough for daily cron and uses ETHUSDT as live proxy because
+# Binance ETHUSDC spot history is stale/discontinued.
 if [[ "$USE_DOCKER" == "1" ]] && command -v docker-compose >/dev/null 2>&1; then
   echo "Refreshing ETHUSDC price feed..." | tee -a "$LOG_DIR/paper_check_cron.log"
   (
     cd "$REPO_ROOT"
     docker-compose exec -T lpbot python scripts/download_recent_binance_klines.py \
       --symbol ETHUSDT \
-      --interval 1m \
-      --out data/ETHUSDC_1m.csv \
-      --limit 1000
-    docker-compose exec -T lpbot python src/resample/resample_1m.py \
-      --data-dir data \
-      --tfs 5m \
-      --symbols ETHUSDC
+      --interval 5m \
+      --out data/ETHUSDC_5m.csv \
+      --limit 1000 \
+      --days 500 \
+      --timestamp-format iso \
+      --count-1m-rows 5 \
+      --overwrite
   ) 2>&1 | tee -a "$LOG_DIR/paper_check_cron.log" || true
 fi
 
