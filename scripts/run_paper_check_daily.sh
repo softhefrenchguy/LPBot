@@ -42,7 +42,7 @@ if [[ "$USE_DOCKER" == "1" ]] && command -v docker-compose >/dev/null 2>&1; then
   (
     cd "$REPO_ROOT"
     docker-compose exec -T lpbot python scripts/download_recent_binance_klines.py \
-      --symbol ETHUSDC \
+      --symbol ETHUSDT \
       --interval 1m \
       --out data/ETHUSDC_1m.csv \
       --limit 1000
