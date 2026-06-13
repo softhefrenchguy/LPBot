@@ -35,6 +35,24 @@ mkdir -p "$LOG_DIR" "$REPO_ROOT/artifacts/paper_trade"
 
 echo "=== Paper Trade Check $TS ===" | tee -a "$LOG_DIR/paper_check_cron.log"
 
+# Refresh ETH price input used by the checklist. This is intentionally
+# lightweight: merge recent 1m klines, then rebuild the 5m file.
+if [[ "$USE_DOCKER" == "1" ]] && command -v docker-compose >/dev/null 2>&1; then
+  echo "Refreshing ETHUSDC price feed..." | tee -a "$LOG_DIR/paper_check_cron.log"
+  (
+    cd "$REPO_ROOT"
+    docker-compose exec -T lpbot python scripts/download_recent_binance_klines.py \
+      --symbol ETHUSDC \
+      --interval 1m \
+      --out data/ETHUSDC_1m.csv \
+      --limit 1000
+    docker-compose exec -T lpbot python src/resample/resample_1m.py \
+      --data-dir data \
+      --tfs 5m \
+      --symbols ETHUSDC
+  ) 2>&1 | tee -a "$LOG_DIR/paper_check_cron.log" || true
+fi
+
 # Refresh market tracker artifact (best-effort). Primary schedule should run at 07:45.
 if [[ -x "$REPO_ROOT/scripts/run_market_tracker_daily.sh" ]]; then
   echo "Refreshing market tracker artifact..." | tee -a "$LOG_DIR/paper_check_cron.log"
