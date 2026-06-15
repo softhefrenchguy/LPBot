@@ -153,6 +153,10 @@ def fetch_oi_hist(symbol: str, period: str, start: pd.Timestamp, end: pd.Timesta
     return df[df["timestamp"] >= start].reset_index(drop=True)
 
 
+def empty_oi_frame() -> pd.DataFrame:
+    return pd.DataFrame(columns=["timestamp", "oi", "oi_value"])
+
+
 def main():
     p = argparse.ArgumentParser(description="Download Binance spot/perp positioning features")
     p.add_argument("--spot-symbol", default="ETHUSDC")
@@ -162,6 +166,11 @@ def main():
     p.add_argument("--out", default="data/backtest/ETH_perp_features_5m.csv")
     p.add_argument("--cache-dir", default="data/backtest/.cache_perp_features", help="Cache raw downloaded legs so reruns resume quickly.")
     p.add_argument("--refresh-cache", action="store_true", help="Ignore cached raw legs and redownload the requested live window.")
+    p.add_argument(
+        "--strict-oi",
+        action="store_true",
+        help="Fail the whole refresh if Binance open-interest history is unavailable. Default is to continue with NaN OI.",
+    )
     args = p.parse_args()
 
     end = pd.Timestamp.now(tz="UTC").floor(_binance_interval_to_pandas_freq(args.interval))
@@ -215,7 +224,13 @@ def main():
         print(f"Loaded cached oi rows={len(oi)} from {oi_cache}")
     else:
         print(f"Downloading OI history: {args.perp_symbol}")
-        oi = fetch_oi_hist(args.perp_symbol, args.interval, start, end)
+        try:
+            oi = fetch_oi_hist(args.perp_symbol, args.interval, start, end)
+        except Exception as exc:
+            if args.strict_oi:
+                raise
+            print(f"WARNING: OI history download failed; continuing with NaN OI: {exc}", flush=True)
+            oi = empty_oi_frame()
         oi.to_csv(oi_cache, index=False)
         print(f"oi rows={len(oi)} (cached: {oi_cache})")
 
@@ -285,6 +300,10 @@ def main():
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
+    latest = pd.to_datetime(base["timestamp"].iloc[-1], utc=True, errors="coerce")
+    max_expected_lag = pd.Timedelta(_binance_interval_to_pandas_freq(args.interval)) * 2
+    if pd.isna(latest) or latest < end - max_expected_lag:
+        raise RuntimeError(f"Latest feature timestamp is stale: latest={latest}, expected_near={end}")
     base.to_csv(out, index=False)
     print(f"wrote {out} rows={len(base)} first={base['timestamp'].iloc[0]} last={base['timestamp'].iloc[-1]}")
 
