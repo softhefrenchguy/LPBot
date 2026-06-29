@@ -167,6 +167,12 @@ def main():
     p.add_argument("--cache-dir", default="data/backtest/.cache_perp_features", help="Cache raw downloaded legs so reruns resume quickly.")
     p.add_argument("--refresh-cache", action="store_true", help="Ignore cached raw legs and redownload the requested live window.")
     p.add_argument(
+        "--incremental",
+        action="store_true",
+        help="If --out exists, fetch only a recent overlap and merge back into the rolling --days output window.",
+    )
+    p.add_argument("--overlap-hours", type=float, default=24.0, help="Overlap to refetch in --incremental mode.")
+    p.add_argument(
         "--strict-oi",
         action="store_true",
         help="Fail the whole refresh if Binance open-interest history is unavailable. Default is to continue with NaN OI.",
@@ -174,7 +180,23 @@ def main():
     args = p.parse_args()
 
     end = pd.Timestamp.now(tz="UTC").floor(_binance_interval_to_pandas_freq(args.interval))
-    start = end - pd.Timedelta(days=args.days)
+    window_start = end - pd.Timedelta(days=args.days)
+    out = Path(args.out)
+    existing = pd.DataFrame()
+    if args.incremental and out.exists():
+        existing = pd.read_csv(out, low_memory=False)
+        if "timestamp" in existing.columns:
+            existing["timestamp"] = pd.to_datetime(existing["timestamp"], utc=True, errors="coerce")
+            existing = existing.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+        else:
+            existing = pd.DataFrame()
+
+    if args.incremental and not existing.empty:
+        existing_last = pd.to_datetime(existing["timestamp"].iloc[-1], utc=True, errors="coerce")
+        start = max(window_start, existing_last - pd.Timedelta(hours=float(args.overlap_hours)))
+        print(f"Incremental mode: existing_last={existing_last}, fetching overlap {start} -> {end}")
+    else:
+        start = window_start
 
     cache_dir = Path(args.cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -298,7 +320,14 @@ def main():
         base["oi_chg_event"] = np.nan
         base["oi_is_fresh"] = 0
 
-    out = Path(args.out)
+    if args.incremental and not existing.empty:
+        common = [c for c in existing.columns if c in base.columns]
+        if "timestamp" not in common:
+            common = ["timestamp"] + common
+        base = pd.concat([existing[common], base[common]], ignore_index=True)
+        base = base.drop_duplicates(subset=["timestamp"], keep="last").sort_values("timestamp").reset_index(drop=True)
+        base = base[base["timestamp"] >= window_start].reset_index(drop=True)
+
     out.parent.mkdir(parents=True, exist_ok=True)
     latest = pd.to_datetime(base["timestamp"].iloc[-1], utc=True, errors="coerce")
     max_expected_lag = pd.Timedelta(_binance_interval_to_pandas_freq(args.interval)) * 2

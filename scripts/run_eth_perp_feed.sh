@@ -12,7 +12,9 @@ docker-compose exec -T lpbot python /app/scripts/download_perp_features.py \
   --interval 5m \
   --days 30 \
   --out data/backtest/ETH_perp_features_5m_live.csv \
-  --refresh-cache
+  --refresh-cache \
+  --incremental \
+  --overlap-hours 24
 
 docker-compose exec -T lpbot python - \
   --history-csv data/backtest/ETH_perp_features_5m_6y.csv \
