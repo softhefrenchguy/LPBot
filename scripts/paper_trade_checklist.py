@@ -695,12 +695,15 @@ def _send_discord_summary(webhook_url: str, summary: dict[str, object], timeout_
     dvol_pct = _safe_num(summary.get("dvol_iv_percentile", np.nan))
     dvol_slope = _safe_num(summary.get("dvol_term_slope", np.nan))
     dvol_slope_label = "inverted" if np.isfinite(dvol_slope) and dvol_slope < 0 else ("normal" if np.isfinite(dvol_slope) else "NA")
+    dvol_history_days = int(_safe_num(summary.get("dvol_history_days", 0), 0))
+    dvol_insufficient = bool(summary.get("dvol_insufficient_history", True))
+    dvol_mode = "LOG ONLY" if dvol_insufficient or dvol_history_days < 30 else "READY"
     options_vol_lines = [
         f"ATM IV (30d): {_fmt_pct(dvol_iv / 100.0 if dvol_iv > 5 else dvol_iv, 1)}",
         f"IV pct: {_fmt_pct(dvol_pct, 0)} | Regime: {summary.get('dvol_options_vol_regime', 'NA')}",
         f"Term slope: {_fmt_num(dvol_slope, 1)} ({dvol_slope_label})",
         f"vs Realised: {summary.get('dvol_agreement', 'NA')}",
-        f"Note: LOG ONLY ({summary.get('dvol_history_days', 0)}/30 days history)",
+        f"Note: {dvol_mode} ({dvol_history_days}/30 days history)",
     ]
     btc_signal_lines = [
         f"BTC: ${_fmt_num(_safe_num(summary.get('btc_price', np.nan)), 0)} ({_fmt_pct(_safe_num(summary.get('btc_24h_pct', np.nan)), 1)})",
@@ -750,7 +753,7 @@ def _send_discord_summary(webhook_url: str, summary: dict[str, object], timeout_
         {"name": "BTC Signal", "value": "\n".join(btc_signal_lines), "inline": False},
         {"name": "Gold Sleeve (Paper)", "value": "\n".join(gold_lines), "inline": False},
         {"name": "Mean-Reversion Overlay", "value": "\n".join(mean_rev_lines), "inline": False},
-        {"name": "Options Vol (Log Only)", "value": "\n".join(options_vol_lines), "inline": False},
+        {"name": f"Options Vol ({dvol_mode})", "value": "\n".join(options_vol_lines), "inline": False},
         {"name": "Performance (paper)", "value": "\n".join(perf_lines), "inline": False},
         {"name": "News", "value": "\n".join(news_lines), "inline": False},
         {"name": "Health", "value": "\n".join(health_lines), "inline": False},

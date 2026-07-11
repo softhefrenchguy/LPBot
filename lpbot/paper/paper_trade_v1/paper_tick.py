@@ -54,7 +54,6 @@ def compute_paper_rows(
     vol_df: pd.DataFrame,
     bar_minutes: int,
     fee_tier: float,
-    trade_cost_bps: float = 0.0,
     pool_tvl_usd: float,
     in_range_frac: float,
     range_sigma: float,
@@ -68,6 +67,7 @@ def compute_paper_rows(
     lp_weight_max: float,
     lp_min_on_bars: int,
     lp_cooldown_bars: int,
+    trade_cost_bps: float = 0.0,
 ) -> pd.DataFrame:
     required_exposure = {"timestamp", "weight", "sigma_ann_smooth", "gate"}
     required_price = {"timestamp", "close"}
