@@ -85,3 +85,21 @@ These are generated operational records and are ignored by git.
 - BTC uses 5-day confirmation.
 - PAXG is paper-tracked as a gold rotation candidate; it does not execute real trades.
 - News watcher only reads recent RSS headlines, not full articles.
+
+## Funding Feed Stability
+
+Checked on 2026-07-18 after the incremental feed fix (`d7ba02a`):
+
+- ETH perp feed cron is active through `scripts/run_eth_perp_feed.sh`.
+- BTC funding feed cron is active through `scripts/download_btc_perp_features.py`.
+- Latest inspected files on Hetzner were fresh at `2026-07-18 12:10 UTC`.
+- Current BTC funding age was `5.49h`, below the `9.00h` alert threshold.
+- Recent logs show continuous successful writes. Older timeout/container-restart traces remain in logs but are not current.
+
+Verification command:
+
+```bash
+cd ~/LPBot
+grep -E "(OK|FAIL|age_h)" logs/perp_feed.log | tail -50
+tail -50 logs/btc_perp_feed.log
+```

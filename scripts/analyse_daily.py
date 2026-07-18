@@ -164,6 +164,14 @@ def _build_today_block(today: pd.Series, news_latest: dict[str, Any], dvol_lates
     dvol_pctile = _first(today, ["dvol_iv_percentile", "dvol_iv_percentile_pct"], dvol_latest.get("iv_percentile", np.nan))
     dvol_regime = _safe_str(_first(today, ["dvol_options_vol_regime"], dvol_latest.get("options_vol_regime", "n/a")), "n/a")
     dvol_days = int(_safe_num(_first(today, ["dvol_history_days"], dvol_latest.get("history_days", 0)), 0.0))
+    eth_price = _safe_num(_first(today, ["eth_price"]))
+    eth_ema50 = _safe_num(_first(today, ["ema50", "eth_ema50", "ema21"]))
+    eth_ema120 = _safe_num(_first(today, ["ema120", "eth_ema120", "ema55"]))
+    btc_ema15 = _safe_num(_first(today, ["btc_ema15", "btc_ema21"]))
+    btc_ema40 = _safe_num(_first(today, ["btc_ema40", "btc_ema55"]))
+    eth_ema50_gap = eth_ema120 - eth_ema50 if np.isfinite(eth_ema120) and np.isfinite(eth_ema50) else np.nan
+    eth_ema50_gap_pct = eth_ema50_gap / eth_price * 100.0 if np.isfinite(eth_ema50_gap) and np.isfinite(eth_price) and eth_price else np.nan
+    btc_ema15_gap = btc_ema40 - btc_ema15 if np.isfinite(btc_ema40) and np.isfinite(btc_ema15) else np.nan
 
     trade_count = len(trades) if trades is not None else 0
     last_trade = "None"
@@ -185,6 +193,7 @@ def _build_today_block(today: pd.Series, news_latest: dict[str, Any], dvol_lates
         f"{_fmt_num(_first(today, ['ema300', 'eth_ema300', 'ema144']), 0)}",
         f"Stack aligned: {_fmt_bool(_first(today, ['eth_stack_aligned', 'stack_aligned']))}",
         f"Days since break: {_fmt_num(_first(today, ['days_since_break', 'off_days_since_break']), 0)}",
+        f"ETH EMA50->120 gap: ${_fmt_num(eth_ema50_gap, 0)} ({_fmt_num(eth_ema50_gap_pct, 1)}% from alignment)",
         "",
         f"BTC: {_fmt_price(_first(today, ['btc_price']))}",
         f"BTC Regime: {_safe_str(_first(today, ['btc_regime']), 'n/a')}",
@@ -192,6 +201,7 @@ def _build_today_block(today: pd.Series, news_latest: dict[str, Any], dvol_lates
         f"{_fmt_num(_first(today, ['btc_ema15', 'btc_ema21']), 0)} / "
         f"{_fmt_num(_first(today, ['btc_ema40', 'btc_ema55']), 0)} / "
         f"{_fmt_num(_first(today, ['btc_ema120', 'btc_ema144']), 0)}",
+        f"BTC EMA15->40 gap: ${_fmt_num(btc_ema15_gap, 0)}",
         f"Funding z: {_fmt_num(_first(today, ['btc_funding_z']), 3)}",
         "",
         f"Vol regime: {_safe_str(_first(today, ['vol_regime']), 'n/a')} ({_fmt_num(_first(today, ['vol_percentile']), 0)}th pct)",
@@ -240,7 +250,20 @@ Your analysis must:
 - State clearly what to watch next
 - Be concise: max 250 words
 - No fluff, no repeating raw numbers
-- Write as if texting a busy trader who checks Discord once a day"""
+- Write as if texting a busy trader who checks Discord once a day
+
+Always end your analysis with exactly this format:
+
+**Next entry trigger:**
+ETH: EMA50 (${ema50:.0f}) needs to cross EMA120 (${ema120:.0f}) —
+gap ${gap:.0f} ({gap_pct:.1f}%).
+Estimated {weeks} weeks at current trajectory.
+
+BTC: EMA15 (${btc_ema15:.0f}) needs to cross EMA40 (${btc_ema40:.0f}) —
+gap ${btc_gap:.0f}.
+
+Never omit this section.
+Make it specific with actual numbers."""
 
 
 def _call_claude(api_key: str, model: str, history_block: str, today_block: str, limited_history: bool) -> tuple[str, dict[str, Any]]:

@@ -668,9 +668,14 @@ def _send_discord_summary(webhook_url: str, summary: dict[str, object], timeout_
         f"Raw signal: {_fmt_num(def_w_raw, 4)}",
         f"Scaled weight: {_fmt_num(def_w_scaled, 4)}",
     ]
-    gold_ema_fast = summary.get("gold_ema_fast", 21)
-    gold_ema_mid = summary.get("gold_ema_mid", 55)
-    gold_ema_slow = summary.get("gold_ema_slow", 144)
+    gold_ema_default = _cfg_int_list(
+        _load_portfolio_config(Path("config/portfolio_config.json")),
+        "gold_ema",
+        [21, 55, 144],
+    )
+    gold_ema_fast = int(summary.get("gold_ema_fast", gold_ema_default[0]))
+    gold_ema_mid = int(summary.get("gold_ema_mid", gold_ema_default[1]))
+    gold_ema_slow = int(summary.get("gold_ema_slow", gold_ema_default[2]))
     gold_lines = [
         f"PAXG: ${_fmt_num(_safe_num(summary.get('gold_price', np.nan)), 2)} ({_fmt_pct(_safe_num(summary.get('gold_24h_pct', np.nan)), 2)})",
         f"EMA{gold_ema_fast}/{gold_ema_mid}/{gold_ema_slow}: {_fmt_num(_safe_num(summary.get('gold_ema21', np.nan)), 2)} / {_fmt_num(_safe_num(summary.get('gold_ema55', np.nan)), 2)} / {_fmt_num(_safe_num(summary.get('gold_ema144', np.nan)), 2)}",
