@@ -38,6 +38,12 @@ class KrakenExecutionError(RuntimeError):
     pass
 
 
+class KrakenOrderStateUnknown(KrakenExecutionError):
+    def __init__(self, order_id: str, message: str):
+        super().__init__(message)
+        self.order_id = order_id
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -319,20 +325,58 @@ def place_market_order(asset: str, action: str, asset_amount: float, dry_run: bo
     }
 
 
-def confirm_order_filled(order_id: str, timeout_seconds: int = 30) -> dict[str, float]:
+def _extract_order_row(result: dict[str, Any], order_id: str) -> dict[str, Any] | None:
+    row = result.get(order_id)
+    if isinstance(row, dict):
+        return row
+
+    # Kraken can occasionally return a single normalized order row that is not
+    # keyed exactly as the txid we submitted. Treat one unambiguous row as ours.
+    dict_rows = [v for v in result.values() if isinstance(v, dict)]
+    if len(dict_rows) == 1:
+        candidate = dict_rows[0]
+        if "status" in candidate and "descr" in candidate:
+            return candidate
+    return None
+
+
+def confirm_order_filled(order_id: str, timeout_seconds: int = 90) -> dict[str, float]:
     deadline = time.time() + int(timeout_seconds)
+    attempt = 0
+    last_status = "not_found"
+    last_row: dict[str, Any] | None = None
     while time.time() < deadline:
+        attempt += 1
         result = _private_query("QueryOrders", {"txid": order_id})
-        row = result.get(order_id)
+        row = _extract_order_row(result, order_id)
+        if isinstance(row, dict):
+            last_row = row
+            last_status = str(row.get("status", "unknown"))
+        else:
+            last_status = "not_found"
+
         if isinstance(row, dict) and row.get("status") == "closed":
             vol = float(row.get("vol_exec", 0.0))
             cost = float(row.get("cost", 0.0))
             fee = float(row.get("fee", 0.0))
             price = cost / vol if vol > 0 else 0.0
             return {"filled_price": price, "filled_amount": vol, "fee_eur": fee}
-        time.sleep(2.0)
-    _send_discord(f"LIVE TRADE FAILED: order {order_id} not filled within {timeout_seconds}s. Manual review required.")
-    raise KrakenExecutionError(f"ORDER NOT FILLED: {order_id}")
+
+        if isinstance(row, dict) and row.get("status") in {"canceled", "expired"}:
+            raise KrakenExecutionError(f"ORDER {row.get('status')}: {order_id}")
+
+        print(f"Order confirm attempt {attempt}: {order_id} status={last_status}", flush=True)
+        time.sleep(1.0 if attempt <= 10 else 2.0)
+
+    detail = ""
+    if last_row:
+        detail = f" last_status={last_status} vol_exec={last_row.get('vol_exec', '')}"
+    msg = (
+        f"UNKNOWN_ORDER_STATE: {order_id} not confirmed after {timeout_seconds}s."
+        f"{detail} Check Kraken manually before any further trading."
+    )
+    _send_discord(f"LIVE TRADE UNKNOWN STATE: {msg}")
+    raise KrakenOrderStateUnknown(order_id, msg)
 
 
 def execute_strategy_signal(
@@ -395,6 +439,29 @@ def execute_strategy_signal(
                 }
             )
             results[asset] = result
+        except KrakenOrderStateUnknown as exc:
+            _log_execution(
+                {
+                    "timestamp": _now_iso(),
+                    "base_currency": BASE_CURRENCY,
+                    "asset": asset,
+                    "action": plan["action"],
+                    "target_weight": plan["target_weight"],
+                    "actual_weight": plan["current_weight"],
+                    "eur_amount": plan["eur_amount"],
+                    "asset_amount": plan["asset_amount"],
+                    "fill_price": "",
+                    "expected_price": plan.get("price", ""),
+                    "slippage_bps": "",
+                    "fee_eur": "",
+                    "order_id": exc.order_id,
+                    "status": "unknown",
+                    "dry_run": dry_run,
+                    "error_message": str(exc),
+                }
+            )
+            _send_discord(f"LIVE TRADE UNKNOWN STATE: {exc}. Manual review required.")
+            raise
         except Exception as exc:
             _log_execution(
                 {

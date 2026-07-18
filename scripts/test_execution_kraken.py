@@ -14,6 +14,7 @@ from execution_kraken import (
     BASE_CURRENCY,
     BASE_SYMBOL,
     KrakenExecutionError,
+    KrakenOrderStateUnknown,
     calculate_position_size,
     execute_strategy_signal,
     get_account_balance,
@@ -91,6 +92,16 @@ def main() -> int:
                 buy = place_market_order("ETH", "buy", amount, dry_run=False)
                 sell = place_market_order("ETH", "sell", float(buy.get("filled_amount", amount)), dry_run=False)
                 results.append(("Real tiny order", True, f"buy={buy.get('order_id')} sell={sell.get('order_id')}"))
+            except KrakenOrderStateUnknown as exc:
+                try:
+                    post = get_account_balance()
+                    post_msg = (
+                        f"post-balance {BASE_CURRENCY}={BASE_SYMBOL}{post[BASE_CURRENCY]:.2f}, "
+                        f"ETH={post['ETH']:.8f}, BTC={post['BTC']:.8f}"
+                    )
+                except Exception as bal_exc:
+                    post_msg = f"post-balance unavailable: {bal_exc}"
+                results.append(("Real tiny order", False, f"{exc}; {post_msg}"))
             except Exception as exc:
                 results.append(("Real tiny order", False, str(exc)))
     else:
