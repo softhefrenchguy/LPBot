@@ -700,7 +700,8 @@ def _send_discord_summary(webhook_url: str, summary: dict[str, object], timeout_
     dvol_pct = _safe_num(summary.get("dvol_iv_percentile", np.nan))
     dvol_slope = _safe_num(summary.get("dvol_term_slope", np.nan))
     dvol_slope_label = "inverted" if np.isfinite(dvol_slope) and dvol_slope < 0 else ("normal" if np.isfinite(dvol_slope) else "NA")
-    dvol_history_days = int(_safe_num(summary.get("dvol_history_days", 0), 0))
+    dvol_history_days_raw = _safe_num(summary.get("dvol_history_days", 0))
+    dvol_history_days = int(dvol_history_days_raw) if np.isfinite(dvol_history_days_raw) else 0
     dvol_insufficient = bool(summary.get("dvol_insufficient_history", True))
     dvol_mode = "LOG ONLY" if dvol_insufficient or dvol_history_days < 30 else "READY"
     options_vol_lines = [
