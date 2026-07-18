@@ -272,7 +272,13 @@ def _require_live_confirmation(asset: str, action: str, asset_amount: float, eur
         raise KrakenExecutionError("Real order aborted by confirmation prompt")
 
 
-def place_market_order(asset: str, action: str, asset_amount: float, dry_run: bool = True) -> dict[str, Any]:
+def place_market_order(
+    asset: str,
+    action: str,
+    asset_amount: float,
+    dry_run: bool = True,
+    log_standalone: bool = True,
+) -> dict[str, Any]:
     asset = asset.upper()
     action = action.lower()
     expected_price = get_current_price(asset)
@@ -314,7 +320,7 @@ def place_market_order(asset: str, action: str, asset_amount: float, dry_run: bo
     actual_price = float(fill["filled_price"])
     if expected_price > 0 and abs(actual_price / expected_price - 1.0) > SLIPPAGE_WARN_PCT:
         _send_discord(f"SLIPPAGE WARNING: {asset} {action} moved from {BASE_SYMBOL}{expected_price:.2f} to {BASE_SYMBOL}{actual_price:.2f}")
-    return {
+    result = {
         "order_id": order_id,
         "status": "filled",
         "filled_price": actual_price,
@@ -323,6 +329,29 @@ def place_market_order(asset: str, action: str, asset_amount: float, dry_run: bo
         "timestamp": _now_iso(),
         "dry_run": False,
     }
+    if log_standalone:
+        slippage_bps = ((actual_price / expected_price) - 1.0) * 10000.0 if expected_price > 0 else 0.0
+        _log_execution(
+            {
+                "timestamp": result["timestamp"],
+                "base_currency": BASE_CURRENCY,
+                "asset": asset,
+                "action": action.upper(),
+                "target_weight": "",
+                "actual_weight": "",
+                "eur_amount": float(result["filled_amount"]) * actual_price,
+                "asset_amount": result["filled_amount"],
+                "fill_price": actual_price,
+                "expected_price": expected_price,
+                "slippage_bps": slippage_bps,
+                "fee_eur": result["fee_eur"],
+                "order_id": order_id,
+                "status": "filled",
+                "dry_run": False,
+                "error_message": "",
+            }
+        )
+    return result
 
 
 def _extract_order_row(result: dict[str, Any], order_id: str) -> dict[str, Any] | None:
@@ -414,7 +443,13 @@ def execute_strategy_signal(
     for plan in sells + buys:
         asset = str(plan["asset"])
         try:
-            result = place_market_order(asset, str(plan["action"]).lower(), float(plan["asset_amount"]), dry_run=dry_run)
+            result = place_market_order(
+                asset,
+                str(plan["action"]).lower(),
+                float(plan["asset_amount"]),
+                dry_run=dry_run,
+                log_standalone=False,
+            )
             expected = float(plan["price"])
             filled = float(result["filled_price"])
             slippage_bps = ((filled / expected) - 1.0) * 10000.0 if expected > 0 else 0.0
