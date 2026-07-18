@@ -753,11 +753,13 @@ def _send_discord_summary(webhook_url: str, summary: dict[str, object], timeout_
     ]
     live_lines: list[str] = []
     if bool(summary.get("live_mode_requested", False)):
+        live_base_currency = str(summary.get("live_base_currency", "EUR") or "EUR")
+        live_currency_symbol = "€" if live_base_currency.upper() == "EUR" else live_base_currency.upper()
         live_lines = [
             f"Mode: {'DRY RUN' if bool(summary.get('live_execution_dry_run', True)) else 'REAL'}",
             f"ETH: {summary.get('live_eth_status', 'NA')}",
             f"BTC: {summary.get('live_btc_status', 'NA')}",
-            f"Fees: ${_fmt_num(_safe_num(summary.get('live_total_fees_usd', np.nan)), 2)}",
+            f"Fees: {live_currency_symbol}{_fmt_num(_safe_num(summary.get('live_total_fees_eur', np.nan)), 2)}",
         ]
         if str(summary.get("live_execution_error", "")).strip():
             live_lines.append(f"Error: {summary.get('live_execution_error')}")
@@ -1934,7 +1936,7 @@ def _run() -> int:
             live_execution_report = execute_strategy_signal(
                 eth_target_weight=float(eth_execution_weight) if np.isfinite(eth_execution_weight) else 0.0,
                 btc_target_weight=float(btc_comb_w) if np.isfinite(btc_comb_w) else 0.0,
-                total_capital_usd=None,
+                total_capital_eur=None,
                 dry_run=live_execution_dry_run,
             )
         except Exception as exc:
@@ -2338,8 +2340,9 @@ def _run() -> int:
         "live_mode_requested": bool(args.live),
         "live_execution_dry_run": bool(live_execution_dry_run),
         "live_execution_error": live_execution_error,
+        "live_base_currency": str(live_execution_report.get("base_currency", "EUR")) if live_execution_report else "EUR",
         "live_execution_time_ms": _safe_num(live_execution_report.get("execution_time_ms", np.nan)) if live_execution_report else np.nan,
-        "live_total_fees_usd": _safe_num(live_execution_report.get("total_fees_usd", np.nan)) if live_execution_report else np.nan,
+        "live_total_fees_eur": _safe_num(live_execution_report.get("total_fees_eur", np.nan)) if live_execution_report else np.nan,
         "live_eth_status": str((live_execution_report.get("eth_trade") or {}).get("status", "")) if live_execution_report else "",
         "live_btc_status": str((live_execution_report.get("btc_trade") or {}).get("status", "")) if live_execution_report else "",
         "chop_bps_bar_60d": chop_bps_60d,
@@ -2519,7 +2522,8 @@ def _run() -> int:
             "live_mode_requested": out_row["live_mode_requested"],
             "live_execution_dry_run": out_row["live_execution_dry_run"],
             "live_execution_error": out_row["live_execution_error"],
-            "live_total_fees_usd": out_row["live_total_fees_usd"],
+            "live_base_currency": out_row["live_base_currency"],
+            "live_total_fees_eur": out_row["live_total_fees_eur"],
             "live_eth_status": out_row["live_eth_status"],
             "live_btc_status": out_row["live_btc_status"],
             "flags_text": out_row["flags_text"],

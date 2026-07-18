@@ -3,6 +3,9 @@
   "gross_cap": 0.8,
   "cost_mode": "weight_change",
   "cost_bps": 20,
+  "base_currency": "EUR",
+  "eth_pair": "ETHEUR",
+  "btc_pair": "XBTEUR",
   "eth_ema": [
     50,
     120,
