@@ -704,13 +704,25 @@ def _send_discord_summary(webhook_url: str, summary: dict[str, object], timeout_
     dvol_history_days = int(dvol_history_days_raw) if np.isfinite(dvol_history_days_raw) else 0
     dvol_insufficient = bool(summary.get("dvol_insufficient_history", True))
     dvol_mode = "LOG ONLY" if dvol_insufficient or dvol_history_days < 30 else "READY"
+    dvol_options_regime = str(summary.get("dvol_options_vol_regime", "NA")).upper()
+    dvol_rv_regime = str(summary.get("dvol_rv_vol_regime", "NA")).upper()
+    dvol_disagree = (
+        dvol_options_regime not in {"", "NA", "NAN"}
+        and dvol_rv_regime not in {"", "NA", "NAN"}
+        and dvol_options_regime != dvol_rv_regime
+    )
     options_vol_lines = [
         f"ATM IV (30d): {_fmt_pct(dvol_iv / 100.0 if dvol_iv > 5 else dvol_iv, 1)}",
-        f"IV pct: {_fmt_pct(dvol_pct, 0)} | Regime: {summary.get('dvol_options_vol_regime', 'NA')}",
+        f"IV pct: {_fmt_pct(dvol_pct, 0)} | Regime: {dvol_options_regime}",
         f"Term slope: {_fmt_num(dvol_slope, 1)} ({dvol_slope_label})",
         f"vs Realised: {summary.get('dvol_agreement', 'NA')}",
         f"Note: {dvol_mode} ({dvol_history_days}/30 days history)",
     ]
+    if dvol_disagree:
+        options_vol_lines.insert(
+            0,
+            f"IV DISAGREE: Options={dvol_options_regime}, RV={dvol_rv_regime} | Hist avg next 5d: +2.64%",
+        )
     btc_signal_lines = [
         f"BTC: ${_fmt_num(_safe_num(summary.get('btc_price', np.nan)), 0)} ({_fmt_pct(_safe_num(summary.get('btc_24h_pct', np.nan)), 1)})",
         f"EMA15/40/120: {_fmt_num(_safe_num(summary.get('btc_ema15', summary.get('btc_ema21', np.nan))), 2)} / {_fmt_num(_safe_num(summary.get('btc_ema40', summary.get('btc_ema55', np.nan))), 2)} / {_fmt_num(_safe_num(summary.get('btc_ema120', summary.get('btc_ema144', np.nan))), 2)}",

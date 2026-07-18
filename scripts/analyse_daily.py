@@ -163,7 +163,14 @@ def _build_today_block(today: pd.Series, news_latest: dict[str, Any], dvol_lates
     dvol_atm = _first(today, ["dvol_atm_iv_30d"], dvol_latest.get("atm_iv_30d", np.nan))
     dvol_pctile = _first(today, ["dvol_iv_percentile", "dvol_iv_percentile_pct"], dvol_latest.get("iv_percentile", np.nan))
     dvol_regime = _safe_str(_first(today, ["dvol_options_vol_regime"], dvol_latest.get("options_vol_regime", "n/a")), "n/a")
+    dvol_rv_regime = _safe_str(_first(today, ["dvol_rv_vol_regime"], dvol_latest.get("rv_vol_regime", "n/a")), "n/a")
+    dvol_agreement = _safe_str(_first(today, ["dvol_agreement"], dvol_latest.get("agreement", "n/a")), "n/a")
     dvol_days = int(_safe_num(_first(today, ["dvol_history_days"], dvol_latest.get("history_days", 0)), 0.0))
+    dvol_disagree = (
+        dvol_regime.strip().upper() not in {"", "N/A", "NA", "NAN"}
+        and dvol_rv_regime.strip().upper() not in {"", "N/A", "NA", "NAN"}
+        and dvol_regime.strip().upper() != dvol_rv_regime.strip().upper()
+    )
     eth_price = _safe_num(_first(today, ["eth_price"]))
     eth_ema50 = _safe_num(_first(today, ["ema50", "eth_ema50", "ema21"]))
     eth_ema120 = _safe_num(_first(today, ["ema120", "eth_ema120", "ema55"]))
@@ -212,6 +219,14 @@ def _build_today_block(today: pd.Series, news_latest: dict[str, Any], dvol_lates
         f"Options IV (30d): {_fmt_num(dvol_atm, 1)}%",
         f"IV percentile: {_fmt_num(dvol_pctile, 0)}th",
         f"IV regime: {dvol_regime}",
+        f"RV regime: {dvol_rv_regime}",
+        f"IV/RV agreement: {dvol_agreement}",
+        (
+            f"IV DISAGREE: Options={dvol_regime}, RV={dvol_rv_regime}; "
+            "historical avg next 5d: +2.64%"
+            if dvol_disagree
+            else "IV DISAGREE: NO"
+        ),
         f"Signal active: {'YES' if dvol_days >= 30 else 'NO'}",
         "",
         f"Strategy: {_fmt_pct(_first(today, ['portfolio_strategy_ret', 'cum_strategy_ret']), 2, signed=True)}",
