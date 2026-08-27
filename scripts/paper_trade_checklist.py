@@ -272,19 +272,14 @@ def _filter_log_to_current_config(
         return df, False
     d = df.copy()
     if "config_fingerprint" in d.columns:
-        fp = d["config_fingerprint"].astype(str)
-        matched = d[fp == str(config_fingerprint)].copy()
+        fp = d["config_fingerprint"].astype(str).str.strip()
+        known = fp.notna() & fp.ne("") & fp.ne("nan") & fp.ne("None")
+        matched = d[known & fp.eq(str(config_fingerprint))].copy()
         return matched, len(matched) != len(d)
 
-    if fallback_ema_cols and fallback_ema_vals and all(c in d.columns for c in fallback_ema_cols):
-        mask = pd.Series(True, index=d.index)
-        for col, val in zip(fallback_ema_cols, fallback_ema_vals):
-            mask &= pd.to_numeric(d[col], errors="coerce").eq(int(val))
-        matched = d[mask].copy()
-        return matched, len(matched) != len(d)
-
-    # Old logs cannot prove which config created their weights. Do not blend
-    # them into current-config performance after an EMA/config migration.
+    # Old logs cannot prove which config created their weights. EMA labels alone
+    # are not enough after backfills/cold starts, so never blend pre-fingerprint
+    # rows into current-config performance.
     return d.iloc[0:0].copy(), bool(len(d))
 
 
