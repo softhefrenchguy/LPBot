@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -234,6 +235,57 @@ def _cfg_int_list(cfg: dict[str, object], key: str, default: list[int]) -> list[
     except Exception:
         return list(default)
     return out if len(out) == len(default) else list(default)
+
+
+def _paper_config_fingerprint(args: argparse.Namespace, cfg: dict[str, object]) -> str:
+    payload = {
+        "eth_ema": [int(args.off_ema_fast), int(args.off_ema_mid), int(args.off_ema_slow)],
+        "eth_confirm_days": int(args.off_confirm_days),
+        "btc_ema": [int(args.btc_ema_fast), int(args.btc_ema_mid), int(args.btc_ema_slow)],
+        "btc_confirm_days": int(args.btc_confirm_days),
+        "gold_ema": [int(args.gold_ema_fast), int(args.gold_ema_mid), int(args.gold_ema_slow)],
+        "gross_cap": _cfg_float(cfg, "gross_cap", 1.0),
+        "vol_filter": _cfg_bool(cfg, "vol_filter", False),
+        "transition_momentum": _cfg_bool(cfg, "transition_momentum", False),
+        "asymmetric_sizing": _cfg_bool(cfg, "asymmetric_sizing", False),
+        "mean_reversion_overlay_enabled": _cfg_bool(cfg, "mean_reversion_overlay_enabled", False),
+        "router": {
+            "bull_off": float(args.router_bull_off),
+            "chop_off": float(args.router_chop_off),
+            "bear_off": float(args.router_bear_off),
+            "bull_def": float(args.router_bull_def),
+            "chop_def": float(args.router_chop_def),
+            "bear_def": float(args.router_bear_def),
+        },
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _filter_log_to_current_config(
+    df: pd.DataFrame,
+    config_fingerprint: str,
+    fallback_ema_cols: tuple[str, str, str] | None = None,
+    fallback_ema_vals: tuple[int, int, int] | None = None,
+) -> tuple[pd.DataFrame, bool]:
+    if df.empty:
+        return df, False
+    d = df.copy()
+    if "config_fingerprint" in d.columns:
+        fp = d["config_fingerprint"].astype(str)
+        matched = d[fp == str(config_fingerprint)].copy()
+        return matched, len(matched) != len(d)
+
+    if fallback_ema_cols and fallback_ema_vals and all(c in d.columns for c in fallback_ema_cols):
+        mask = pd.Series(True, index=d.index)
+        for col, val in zip(fallback_ema_cols, fallback_ema_vals):
+            mask &= pd.to_numeric(d[col], errors="coerce").eq(int(val))
+        matched = d[mask].copy()
+        return matched, len(matched) != len(d)
+
+    # Old logs cannot prove which config created their weights. Do not blend
+    # them into current-config performance after an EMA/config migration.
+    return d.iloc[0:0].copy(), bool(len(d))
 
 
 def _vol_filter_state(daily_close: pd.Series, cfg: dict[str, object]) -> dict[str, object]:
@@ -1027,6 +1079,7 @@ def _run() -> int:
     transition_momentum_enabled = _cfg_bool(portfolio_cfg, "transition_momentum", False)
     asymmetric_sizing_enabled = _cfg_bool(portfolio_cfg, "asymmetric_sizing", False)
     gross_cap = _cfg_float(portfolio_cfg, "gross_cap", 1.0)
+    config_fingerprint = _paper_config_fingerprint(args, portfolio_cfg)
 
     # Load inputs
     price = _read_csv_ts(Path(args.price_csv))
@@ -1772,7 +1825,16 @@ def _run() -> int:
                 ex_rows = []
                 if live_log_path.exists():
                     try:
-                        lg_prev = pd.read_csv(live_log_path, usecols=["date", "combined_weight"])
+                        lg_prev = pd.read_csv(live_log_path, low_memory=False)
+                        lg_prev, migrated = _filter_log_to_current_config(
+                            lg_prev,
+                            config_fingerprint,
+                            ("eth_ema_fast", "eth_ema_mid", "eth_ema_slow"),
+                            (int(args.off_ema_fast), int(args.off_ema_mid), int(args.off_ema_slow)),
+                        )
+                        if migrated:
+                            reviews.append("paper_performance_epoch_reset_config_changed")
+                        lg_prev = lg_prev[["date", "combined_weight"]]
                         lg_prev["day"] = pd.to_datetime(lg_prev["date"], utc=True, errors="coerce").dt.floor("D")
                         lg_prev["combined_weight"] = pd.to_numeric(lg_prev["combined_weight"], errors="coerce")
                         lg_prev = lg_prev.dropna(subset=["day"]).sort_values("day")
@@ -1812,7 +1874,16 @@ def _run() -> int:
             b_ex_rows = []
             if btc_log_path.exists():
                 try:
-                    bl_prev = pd.read_csv(btc_log_path, usecols=["date", "btc_combined_weight"])
+                    bl_prev = pd.read_csv(btc_log_path, low_memory=False)
+                    bl_prev, migrated = _filter_log_to_current_config(
+                        bl_prev,
+                        config_fingerprint,
+                        ("btc_ema_fast", "btc_ema_mid", "btc_ema_slow"),
+                        (int(args.btc_ema_fast), int(args.btc_ema_mid), int(args.btc_ema_slow)),
+                    )
+                    if migrated:
+                        reviews.append("btc_performance_epoch_reset_config_changed")
+                    bl_prev = bl_prev[["date", "btc_combined_weight"]]
                     bl_prev["day"] = pd.to_datetime(bl_prev["date"], utc=True, errors="coerce").dt.floor("D")
                     bl_prev["btc_combined_weight"] = pd.to_numeric(bl_prev["btc_combined_weight"], errors="coerce")
                     bl_prev = bl_prev.dropna(subset=["day"]).sort_values("day")
@@ -1855,7 +1926,14 @@ def _run() -> int:
                 e_ex_rows = []
                 if live_log_path.exists():
                     try:
-                        lg_prev = pd.read_csv(live_log_path, usecols=["date", "combined_weight"])
+                        lg_prev = pd.read_csv(live_log_path, low_memory=False)
+                        lg_prev, _ = _filter_log_to_current_config(
+                            lg_prev,
+                            config_fingerprint,
+                            ("eth_ema_fast", "eth_ema_mid", "eth_ema_slow"),
+                            (int(args.off_ema_fast), int(args.off_ema_mid), int(args.off_ema_slow)),
+                        )
+                        lg_prev = lg_prev[["date", "combined_weight"]]
                         lg_prev["day"] = pd.to_datetime(lg_prev["date"], utc=True, errors="coerce").dt.floor("D")
                         lg_prev["combined_weight"] = pd.to_numeric(lg_prev["combined_weight"], errors="coerce")
                         lg_prev = lg_prev.dropna(subset=["day"]).sort_values("day")
@@ -1876,7 +1954,14 @@ def _run() -> int:
                 mr_w = pd.Series(0.0, index=e_w.index)
                 if _cfg_bool(portfolio_cfg, "mean_reversion_overlay_enabled", False):
                     try:
-                        lg_mr = pd.read_csv(live_log_path, usecols=["date", "mean_reversion_weight"])
+                        lg_mr = pd.read_csv(live_log_path, low_memory=False)
+                        lg_mr, _ = _filter_log_to_current_config(
+                            lg_mr,
+                            config_fingerprint,
+                            ("eth_ema_fast", "eth_ema_mid", "eth_ema_slow"),
+                            (int(args.off_ema_fast), int(args.off_ema_mid), int(args.off_ema_slow)),
+                        )
+                        lg_mr = lg_mr[["date", "mean_reversion_weight"]]
                         lg_mr["day"] = pd.to_datetime(lg_mr["date"], utc=True, errors="coerce").dt.floor("D")
                         lg_mr["mean_reversion_weight"] = pd.to_numeric(lg_mr["mean_reversion_weight"], errors="coerce")
                         lg_mr = lg_mr.dropna(subset=["day"]).sort_values("day")
@@ -2169,6 +2254,8 @@ def _run() -> int:
         "combined_log_csv": args.combined_log_csv,
         "paper_start_date": str(paper_start_ts.date()),
         "days_live": days_live,
+        "config_fingerprint": config_fingerprint,
+        "performance_epoch_guard": "config_fingerprint",
         "price_last_ts": str(price_last) if pd.notna(price_last) else "",
         "funding_last_ts": str(funding_last) if pd.notna(funding_last) else "",
         "price_age_hours": price_age_h,
