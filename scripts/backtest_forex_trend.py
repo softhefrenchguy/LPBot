@@ -302,22 +302,44 @@ def main() -> int:
         corr_values.append(float(row["corr_vs_main"]))
 
     combined_stats = _stats(combined["portfolio_return"])
-    comb = pd.DataFrame(
-        [
+    combined_rows: list[dict[str, object]] = [
+        {
+            "configuration": "main_only",
+            "weighting": "100% crypto",
+            **main_stats,
+            "avg_fx_corr_vs_main": np.nan,
+        },
+        {
+            "configuration": "main_70_fx_10_each",
+            "weighting": "70% crypto + 10% EURUSD + 10% GBPUSD + 10% USDJPY",
+            **combined_stats,
+            "avg_fx_corr_vs_main": float(np.nanmean(corr_values)) if corr_values else np.nan,
+        },
+    ]
+
+    usdjpy_best = best[best["pair"].astype(str).eq("USDJPY")].iloc[0]
+    usdjpy = pd.read_csv(str(usdjpy_best["daily_csv"]))
+    usdjpy["day"] = pd.to_datetime(usdjpy["timestamp"], utc=True, errors="coerce").dt.floor("D")
+    usdjpy["fx_unit_return"] = pd.to_numeric(usdjpy["strategy_return"], errors="coerce").fillna(0.0) / float(args.position_size)
+    usd_base = main.merge(usdjpy[["day", "fx_unit_return"]], on="day", how="left")
+    usd_base["fx_unit_return"] = pd.to_numeric(usd_base["fx_unit_return"], errors="coerce").fillna(0.0)
+    usd_corr = float(usdjpy_best["corr_vs_main"])
+    for main_w, fx_w in [(0.90, 0.10), (0.80, 0.20), (0.70, 0.30)]:
+        r = main_w * pd.to_numeric(usd_base["main_return"], errors="coerce").fillna(0.0) + fx_w * usd_base["fx_unit_return"]
+        st = _stats(r)
+        combined_rows.append(
             {
-                "configuration": "main_only",
-                "weighting": "100% crypto",
-                **main_stats,
-                "avg_fx_corr_vs_main": np.nan,
-            },
-            {
-                "configuration": "main_70_fx_10_each",
-                "weighting": "70% crypto + 10% EURUSD + 10% GBPUSD + 10% USDJPY",
-                **combined_stats,
-                "avg_fx_corr_vs_main": float(np.nanmean(corr_values)) if corr_values else np.nan,
-            },
-        ]
-    )
+                "configuration": f"main_{int(main_w*100)}_usdjpy_{int(fx_w*100)}",
+                "weighting": f"{main_w:.0%} crypto + {fx_w:.0%} USDJPY",
+                **st,
+                "avg_fx_corr_vs_main": usd_corr,
+            }
+        )
+        tmp = usd_base[["day", "main_return", "fx_unit_return"]].copy()
+        tmp["portfolio_return"] = r
+        tmp.to_csv(work / f"combined_usdjpy_{int(main_w*100)}_{int(fx_w*100)}_daily.csv", index=False)
+
+    comb = pd.DataFrame(combined_rows)
     out_combined = Path(args.out_combined)
     comb.to_csv(out_combined, index=False)
     combined.to_csv(work / "combined_daily.csv", index=False)
@@ -347,6 +369,13 @@ def main() -> int:
     print(f"  Main only: Sharpe {main_stats['sharpe']:.3f}  MaxDD {main_stats['maxdd']*100:.2f}%  CAGR {main_stats['cagr']*100:.2f}%")
     print(f"  + Forex:   Sharpe {combined_stats['sharpe']:.3f}  MaxDD {combined_stats['maxdd']*100:.2f}%  CAGR {combined_stats['cagr']*100:.2f}%")
     print(f"  MaxDD change: {(combined_stats['maxdd'] - main_stats['maxdd'])*100:+.2f}%")
+    print("")
+    print("USDJPY-only allocation sweep:")
+    for _, r in comb[comb["configuration"].astype(str).str.contains("usdjpy")].iterrows():
+        print(
+            f"  {r['weighting']:<24} Sharpe {float(r['sharpe']):.3f}  "
+            f"MaxDD {float(r['maxdd'])*100:.2f}%  CAGR {float(r['cagr'])*100:.2f}%"
+        )
     all_pair_sharpes_ok = bool((best["raw_sharpe"] > 0.5).all())
     max_corr = float(best["corr_vs_main"].max())
     decision = "ADD" if combined_stats["sharpe"] > 1.80 and max_corr < 0.3 and all_pair_sharpes_ok else "SKIP"
