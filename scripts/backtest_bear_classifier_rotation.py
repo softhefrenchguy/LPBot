@@ -52,6 +52,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--out-loo", default="artifacts/bear_classifier/bear_classifier_rotation_leave_one_out.csv")
     p.add_argument("--out-clusters", default="artifacts/bear_classifier/bear_classifier_rotation_cluster_exclusions.csv")
     p.add_argument("--out-vixy-friction", default="artifacts/bear_classifier/bear_classifier_rotation_vixy_friction.csv")
+    p.add_argument("--out-panic-alternatives", default="artifacts/bear_classifier/bear_classifier_panic_alternatives.csv")
     return p.parse_args()
 
 
@@ -168,7 +169,10 @@ def _apply_classifier_rotation(
     exclude_bear_start: str | None = None,
     exclude_bear_starts: set[str] | None = None,
     vixy_extra_slippage_bps: float = 0.0,
+    panic_mode: str = "vixy",
 ) -> pd.DataFrame:
+    if panic_mode not in {"vixy", "flat_cash", "short_btc"}:
+        raise ValueError(f"Unsupported panic_mode: {panic_mode}")
     daily = daily_in.copy()
     daily["classifier_asset"] = "gold_fallback"
     daily["classifier_target_weight"] = 0.0
@@ -187,12 +191,22 @@ def _apply_classifier_rotation(
         if not bool(p["classifier_actionable"]):
             continue
         if p["assigned_bear_type"] == "PANIC_BEAR":
-            daily.loc[mask, "classifier_asset"] = "vixy_long_vol"
-            daily.loc[mask, "classifier_asset_return"] = vixy_ret.loc[mask].to_numpy()
+            if panic_mode == "vixy":
+                daily.loc[mask, "classifier_asset"] = "vixy_long_vol"
+                daily.loc[mask, "classifier_asset_return"] = vixy_ret.loc[mask].to_numpy()
+                daily.loc[mask, "classifier_target_weight"] = eligible_weight.loc[mask].to_numpy()
+            elif panic_mode == "flat_cash":
+                daily.loc[mask, "classifier_asset"] = "flat_cash"
+                daily.loc[mask, "classifier_asset_return"] = 0.0
+                daily.loc[mask, "classifier_target_weight"] = 0.0
+            elif panic_mode == "short_btc":
+                daily.loc[mask, "classifier_asset"] = "short_btc"
+                daily.loc[mask, "classifier_asset_return"] = -pd.to_numeric(daily.loc[mask, "btc_spot_return"], errors="coerce").fillna(0.0).to_numpy()
+                daily.loc[mask, "classifier_target_weight"] = eligible_weight.loc[mask].to_numpy()
         elif p["assigned_bear_type"] == "INFLATION_BEAR":
             daily.loc[mask, "classifier_asset"] = "uso_energy"
             daily.loc[mask, "classifier_asset_return"] = uso_ret.loc[mask].to_numpy()
-        daily.loc[mask, "classifier_target_weight"] = eligible_weight.loc[mask].to_numpy()
+            daily.loc[mask, "classifier_target_weight"] = eligible_weight.loc[mask].to_numpy()
 
     daily["classifier_defensive_weight"] = daily["classifier_target_weight"].shift(1).fillna(0.0)
     daily["classifier_asset_exec"] = daily["classifier_asset"].shift(1).fillna("gold_fallback")
@@ -211,6 +225,7 @@ def _apply_classifier_rotation(
 
     fallback = daily["gold_strategy_return"]
     actionable_mask = daily["classifier_asset"].isin(["vixy_long_vol", "uso_energy"])
+    actionable_mask = actionable_mask | daily["classifier_asset"].isin(["flat_cash", "short_btc"])
     daily["classifier_defensive_return"] = np.where(actionable_mask, replacement, fallback)
     daily["base_ex_gold_return"] = daily["baseline_current_return"] - daily["gold_strategy_return"]
     daily["classifier_return"] = daily["base_ex_gold_return"] + daily["classifier_defensive_return"]
@@ -288,6 +303,17 @@ def _summarise_periods(daily: pd.DataFrame, periods: pd.DataFrame) -> pd.DataFra
     return pd.DataFrame(rows)
 
 
+def _panic_period_contrib(daily: pd.DataFrame, periods: pd.DataFrame, return_col: str) -> float:
+    total = 0.0
+    panic_periods = periods[periods["assigned_bear_type"].eq("PANIC_BEAR")]
+    for _, p in panic_periods.iterrows():
+        g = daily[_period_mask(daily["day"], p["bear_start"], p["bear_end"])]
+        if g.empty:
+            continue
+        total += float((1.0 + g[return_col]).prod() - (1.0 + g["baseline_current_return"]).prod())
+    return total
+
+
 def main() -> int:
     args = _parse_args()
     daily = _load_daily(Path(args.daily), args.start, args.end)
@@ -311,12 +337,64 @@ def main() -> int:
     dumb_bear_idle_daily = _apply_dumb_bear_idle_blend(
         daily, periods, vixy_ret, uso_ret, args.cost_bps, args.defensive_cap, args.gross_cap
     )
+    panic_alt_rows = []
+    panic_alt_period_rows = []
+    for mode in ["vixy", "flat_cash", "short_btc"]:
+        alt_daily = _apply_classifier_rotation(
+            _load_daily(Path(args.daily), args.start, args.end),
+            periods,
+            vixy_ret,
+            uso_ret,
+            args.cost_bps,
+            args.defensive_cap,
+            args.gross_cap,
+            panic_mode=mode,
+        )
+        st = _stats(alt_daily["classifier_return"])
+        panic_alt_rows.append(
+            {
+                "panic_mode": mode,
+                "sharpe": st["sharpe"],
+                "cagr": st["cagr"],
+                "maxdd": st["maxdd"],
+                "return": st["return"],
+                "delta_sharpe_vs_baseline": st["sharpe"] - baseline_stats["sharpe"] if "baseline_stats" in locals() else np.nan,
+                "delta_cagr_vs_baseline": st["cagr"] - baseline_stats["cagr"] if "baseline_stats" in locals() else np.nan,
+                "delta_maxdd_vs_baseline": st["maxdd"] - baseline_stats["maxdd"] if "baseline_stats" in locals() else np.nan,
+                "panic_period_contribution_vs_baseline": np.nan,
+            }
+        )
+        panic_periods = periods[periods["assigned_bear_type"].eq("PANIC_BEAR")]
+        for _, p in panic_periods.iterrows():
+            g = alt_daily[_period_mask(alt_daily["day"], p["bear_start"], p["bear_end"])]
+            if g.empty:
+                continue
+            panic_alt_period_rows.append(
+                {
+                    "panic_mode": mode,
+                    "bear_start": p["bear_start"],
+                    "bear_end": p["bear_end"],
+                    "period_return": float((1.0 + g["classifier_return"]).prod() - 1.0),
+                    "baseline_period_return": float((1.0 + g["baseline_current_return"]).prod() - 1.0),
+                    "period_contribution_vs_baseline": float((1.0 + g["classifier_return"]).prod() - (1.0 + g["baseline_current_return"]).prod()),
+                }
+            )
 
     baseline_stats = _stats(daily["baseline_current_return"])
     classifier_stats = _stats(daily["classifier_return"])
     dumb_stats = _stats(dumb_daily["dumb_blend_return"])
     dumb_bear_idle_stats = _stats(dumb_bear_idle_daily["dumb_bear_idle_blend_return"])
     diff = classifier_stats["sharpe"] - baseline_stats["sharpe"]
+    panic_alts = pd.DataFrame(panic_alt_rows)
+    for idx, row in panic_alts.iterrows():
+        # Fill baseline-relative deltas now baseline_stats exists.
+        panic_alts.loc[idx, "delta_sharpe_vs_baseline"] = row["sharpe"] - baseline_stats["sharpe"]
+        panic_alts.loc[idx, "delta_cagr_vs_baseline"] = row["cagr"] - baseline_stats["cagr"]
+        panic_alts.loc[idx, "delta_maxdd_vs_baseline"] = row["maxdd"] - baseline_stats["maxdd"]
+    panic_alt_periods = pd.DataFrame(panic_alt_period_rows)
+    if not panic_alt_periods.empty:
+        contrib = panic_alt_periods.groupby("panic_mode")["period_contribution_vs_baseline"].sum()
+        panic_alts["panic_period_contribution_vs_baseline"] = panic_alts["panic_mode"].map(contrib).fillna(0.0)
 
     period_summary = _summarise_periods(daily, periods)
     actionable = period_summary[period_summary["classifier_proxy"].isin(["vixy_long_vol", "uso_energy"])]
@@ -489,6 +567,8 @@ def main() -> int:
     loo.to_csv(args.out_loo, index=False)
     clusters.to_csv(args.out_clusters, index=False)
     vixy_friction.to_csv(args.out_vixy_friction, index=False)
+    panic_alts.to_csv(args.out_panic_alternatives, index=False)
+    panic_alt_periods.to_csv(Path(args.out_panic_alternatives).with_name("bear_classifier_panic_alternative_periods.csv"), index=False)
 
     print("=" * 100)
     print("BEAR CLASSIFIER ROTATION BACKTEST")
@@ -574,6 +654,27 @@ def main() -> int:
         ].to_string(index=False)
     )
     print()
+    print("Crypto-native PANIC_BEAR alternatives:")
+    print(
+        panic_alts[
+            [
+                "panic_mode",
+                "sharpe",
+                "cagr",
+                "maxdd",
+                "delta_sharpe_vs_baseline",
+                "delta_cagr_vs_baseline",
+                "panic_period_contribution_vs_baseline",
+            ]
+        ].to_string(index=False)
+    )
+    print()
+    print("PANIC period contributions by mode:")
+    if panic_alt_periods.empty:
+        print("  none")
+    else:
+        print(panic_alt_periods.to_string(index=False))
+    print()
     print("Improvement concentration:")
     if concentration.empty:
         print("  none")
@@ -586,6 +687,7 @@ def main() -> int:
     print(f"Saved LOO:     {args.out_loo}")
     print(f"Saved clusters:{args.out_clusters}")
     print(f"Saved friction:{args.out_vixy_friction}")
+    print(f"Saved panic alternatives:{args.out_panic_alternatives}")
     print("=" * 100)
     return 0
 
