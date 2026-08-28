@@ -28,7 +28,7 @@ PREFERRED_ASSETS = {
     "INFLATION_BEAR": {"energy", "usd"},
     "PANIC_BEAR": {"vix", "gold"},
     "GEOPOLITICAL_BEAR": {"gold"},
-    "AMBIGUOUS": set(),
+    "UNCLASSIFIED": set(),
 }
 
 
@@ -91,23 +91,22 @@ def _score_row(row: pd.Series) -> tuple[str, str, bool]:
         inflation_score += 1
         reasons.append("VIX not yet panic-high")
 
-    # Geopolitical/stress-shock bucket: credit widening or moderate VIX stress
-    # without enough CPI evidence for an inflation bear and without full panic.
-    if credit >= 0.95:
-        geopolitical_score += 1
-        reasons.append(f"credit spread level high at {credit:.2f}")
-    if credit_trend >= 0.15:
+    # Geopolitical is NOT a catch-all. It only fires on a positive shock
+    # signature: credit spreads widening sharply, no clear inflation impulse,
+    # and no already-obvious VIX panic. Otherwise the correct answer is
+    # UNCLASSIFIED.
+    if credit_trend >= 0.30:
+        geopolitical_score += 3
+        reasons.append(f"credit spread trend sharply widening +{credit_trend:.2f}")
+    elif credit_trend >= 0.20:
         geopolitical_score += 2
         reasons.append(f"credit spread trend widening +{credit_trend:.2f}")
-    elif credit_trend >= 0.05:
-        geopolitical_score += 1
-        reasons.append(f"credit spread trend mildly widening +{credit_trend:.2f}")
     if 16 <= vix < 25:
         geopolitical_score += 1
-        reasons.append(f"moderate VIX stress at {vix:.1f}")
-    if cpi < 0.04 or cpi_trend <= 0:
+        reasons.append(f"moderate, non-panic VIX stress at {vix:.1f}")
+    if cpi < 0.04 and cpi_trend <= 0.0025:
         geopolitical_score += 1
-        reasons.append("no clear CPI acceleration")
+        reasons.append("no clear inflation impulse")
 
     scores = {
         "PANIC_BEAR": panic_score,
@@ -123,18 +122,18 @@ def _score_row(row: pd.Series) -> tuple[str, str, bool]:
         assigned = "PANIC_BEAR"
     elif inflation_score >= 4 and panic_score < 4:
         assigned = "INFLATION_BEAR"
-    elif geopolitical_score >= 3:
+    elif geopolitical_score >= 4 and panic_score < 4 and inflation_score < 4:
         assigned = "GEOPOLITICAL_BEAR"
     elif panic_score >= 3:
         assigned = "PANIC_BEAR"
     elif inflation_score >= 3:
         assigned = "INFLATION_BEAR"
     else:
-        assigned = "AMBIGUOUS"
+        assigned = "UNCLASSIFIED"
 
     sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     borderline = (
-        assigned == "AMBIGUOUS"
+        assigned == "UNCLASSIFIED"
         or len(sorted_scores) > 1
         and sorted_scores[0][1] - sorted_scores[1][1] <= 1
         and sorted_scores[1][1] >= 3
@@ -198,8 +197,17 @@ def main() -> int:
     out.to_csv(out_path, index=False)
 
     hit_rate = float(out["hindsight_asset_match"].mean())
-    non_amb = out[~out["assigned_bear_type"].eq("AMBIGUOUS")]
-    non_amb_hit_rate = float(non_amb["hindsight_asset_match"].mean()) if not non_amb.empty else np.nan
+    classified = out[~out["assigned_bear_type"].eq("UNCLASSIFIED")]
+    classified_hit_rate = float(classified["hindsight_asset_match"].mean()) if not classified.empty else np.nan
+    winner_counts = (
+        out["best_hindsight_asset_return_over_bear_period"]
+        .astype(str)
+        .str.lower()
+        .value_counts()
+        .rename_axis("asset")
+        .reset_index(name="wins")
+    )
+    winner_counts["win_rate"] = winner_counts["wins"] / len(out)
 
     pd.set_option("display.max_columns", 40)
     pd.set_option("display.width", 220)
@@ -209,8 +217,16 @@ def main() -> int:
     print(f"Input: {inp}")
     print(f"Rows classified: {len(out)}")
     print(f"Saved: {out_path}")
-    print(f"Overall hit rate: {hit_rate * 100:.1f}%")
-    print(f"Non-ambiguous hit rate: {non_amb_hit_rate * 100:.1f}%" if np.isfinite(non_amb_hit_rate) else "Non-ambiguous hit rate: n/a")
+    print(
+        "Hindsight winner definition: close-to-close return over the full LPBot major_bear period; "
+        "VIX uses the ^VIX index as a stress proxy, not a directly tradable product."
+    )
+    print(f"Overall hit rate including UNCLASSIFIED rows: {hit_rate * 100:.1f}%")
+    print(f"Hit rate on classified rows only: {classified_hit_rate * 100:.1f}%" if np.isfinite(classified_hit_rate) else "Hit rate on classified rows only: n/a")
+    print()
+    print("Hindsight winner distribution across major_bear rows:")
+    for _, r in winner_counts.iterrows():
+        print(f"  {r['asset']}: {int(r['wins'])}/{len(out)} ({r['win_rate'] * 100:.1f}%)")
     print()
     print(
         out[
