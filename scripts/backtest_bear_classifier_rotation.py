@@ -50,6 +50,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--out-daily", default="artifacts/bear_classifier/bear_classifier_rotation_daily.csv")
     p.add_argument("--out-periods", default="artifacts/bear_classifier/bear_classifier_rotation_periods.csv")
     p.add_argument("--out-loo", default="artifacts/bear_classifier/bear_classifier_rotation_leave_one_out.csv")
+    p.add_argument("--out-clusters", default="artifacts/bear_classifier/bear_classifier_rotation_cluster_exclusions.csv")
+    p.add_argument("--out-vixy-friction", default="artifacts/bear_classifier/bear_classifier_rotation_vixy_friction.csv")
     return p.parse_args()
 
 
@@ -164,6 +166,8 @@ def _apply_classifier_rotation(
     defensive_cap: float,
     gross_cap: float,
     exclude_bear_start: str | None = None,
+    exclude_bear_starts: set[str] | None = None,
+    vixy_extra_slippage_bps: float = 0.0,
 ) -> pd.DataFrame:
     daily = daily_in.copy()
     daily["classifier_asset"] = "gold_fallback"
@@ -172,9 +176,12 @@ def _apply_classifier_rotation(
 
     used_cap = (daily["alloc_eth"].abs() + daily["alloc_btc"].abs()).clip(lower=0.0)
     eligible_weight = (gross_cap - used_cap).clip(lower=0.0, upper=defensive_cap)
+    excluded = set(exclude_bear_starts or set())
+    if exclude_bear_start is not None:
+        excluded.add(str(exclude_bear_start))
 
     for _, p in periods.iterrows():
-        if exclude_bear_start is not None and str(p["bear_start"]) == exclude_bear_start:
+        if str(p["bear_start"]) in excluded:
             continue
         mask = _period_mask(daily["day"], p["bear_start"], p["bear_end"])
         if not bool(p["classifier_actionable"]):
@@ -188,10 +195,19 @@ def _apply_classifier_rotation(
         daily.loc[mask, "classifier_target_weight"] = eligible_weight.loc[mask].to_numpy()
 
     daily["classifier_defensive_weight"] = daily["classifier_target_weight"].shift(1).fillna(0.0)
+    daily["classifier_asset_exec"] = daily["classifier_asset"].shift(1).fillna("gold_fallback")
     prev_w = daily["classifier_defensive_weight"].shift(1).fillna(0.0)
+    prev_asset = daily["classifier_asset_exec"].shift(1).fillna("gold_fallback")
     daily["classifier_turnover"] = (daily["classifier_defensive_weight"] - prev_w).abs()
+    daily["classifier_vixy_turnover"] = np.where(
+        daily["classifier_asset_exec"].eq("vixy_long_vol") | prev_asset.eq("vixy_long_vol"),
+        daily["classifier_turnover"],
+        0.0,
+    )
     daily["classifier_cost"] = daily["classifier_turnover"] * (cost_bps / 10000.0)
+    daily["classifier_vixy_extra_cost"] = daily["classifier_vixy_turnover"] * (vixy_extra_slippage_bps / 10000.0)
     replacement = daily["classifier_defensive_weight"] * daily["classifier_asset_return"] - daily["classifier_cost"]
+    replacement = replacement - daily["classifier_vixy_extra_cost"]
 
     fallback = daily["gold_strategy_return"]
     actionable_mask = daily["classifier_asset"].isin(["vixy_long_vol", "uso_energy"])
@@ -345,6 +361,73 @@ def main() -> int:
         )
     loo = pd.DataFrame(loo_rows)
 
+    cluster_specs = {
+        "exclude_2021_2022_inflation_rate_cycle": {"2021-12-29", "2022-04-29", "2022-09-16"},
+        "covid_only_exclude_all_non_2020_actionable": {
+            str(s) for s in periods.loc[
+                periods["classifier_actionable"] & periods["bear_start"].ne("2020-02-27"),
+                "bear_start",
+            ]
+        },
+    }
+    cluster_rows = []
+    for name, excluded_starts in cluster_specs.items():
+        cluster_daily = _apply_classifier_rotation(
+            _load_daily(Path(args.daily), args.start, args.end),
+            periods,
+            vixy_ret,
+            uso_ret,
+            args.cost_bps,
+            args.defensive_cap,
+            args.gross_cap,
+            exclude_bear_starts=excluded_starts,
+        )
+        st = _stats(cluster_daily["classifier_return"])
+        cluster_rows.append(
+            {
+                "scenario": name,
+                "excluded_bear_starts": ",".join(sorted(excluded_starts)),
+                "sharpe": st["sharpe"],
+                "cagr": st["cagr"],
+                "maxdd": st["maxdd"],
+                "return": st["return"],
+                "delta_sharpe_vs_baseline": st["sharpe"] - baseline_stats["sharpe"],
+                "delta_cagr_vs_baseline": st["cagr"] - baseline_stats["cagr"],
+                "delta_maxdd_vs_baseline": st["maxdd"] - baseline_stats["maxdd"],
+                "delta_return_vs_baseline": st["return"] - baseline_stats["return"],
+                "delta_sharpe_vs_full_classifier": st["sharpe"] - classifier_stats["sharpe"],
+            }
+        )
+    clusters = pd.DataFrame(cluster_rows)
+
+    vixy_friction_rows = []
+    for extra_bps in [0, 25, 50, 100, 200, 500]:
+        fr_daily = _apply_classifier_rotation(
+            _load_daily(Path(args.daily), args.start, args.end),
+            periods,
+            vixy_ret,
+            uso_ret,
+            args.cost_bps,
+            args.defensive_cap,
+            args.gross_cap,
+            vixy_extra_slippage_bps=float(extra_bps),
+        )
+        st = _stats(fr_daily["classifier_return"])
+        vixy_friction_rows.append(
+            {
+                "vixy_extra_one_way_slippage_bps": extra_bps,
+                "sharpe": st["sharpe"],
+                "cagr": st["cagr"],
+                "maxdd": st["maxdd"],
+                "return": st["return"],
+                "delta_sharpe_vs_baseline": st["sharpe"] - baseline_stats["sharpe"],
+                "delta_cagr_vs_baseline": st["cagr"] - baseline_stats["cagr"],
+                "delta_maxdd_vs_baseline": st["maxdd"] - baseline_stats["maxdd"],
+                "delta_return_vs_baseline": st["return"] - baseline_stats["return"],
+            }
+        )
+    vixy_friction = pd.DataFrame(vixy_friction_rows)
+
     summary = pd.DataFrame(
         [
             {"config": "baseline_gold_fallback", **baseline_stats},
@@ -404,6 +487,8 @@ def main() -> int:
     daily.to_csv(args.out_daily, index=False)
     period_summary.to_csv(args.out_periods, index=False)
     loo.to_csv(args.out_loo, index=False)
+    clusters.to_csv(args.out_clusters, index=False)
+    vixy_friction.to_csv(args.out_vixy_friction, index=False)
 
     print("=" * 100)
     print("BEAR CLASSIFIER ROTATION BACKTEST")
@@ -460,6 +545,35 @@ def main() -> int:
             ].to_string(index=False)
         )
     print()
+    print("Cluster exclusions:")
+    print(
+        clusters[
+            [
+                "scenario",
+                "excluded_bear_starts",
+                "delta_sharpe_vs_baseline",
+                "delta_cagr_vs_baseline",
+                "delta_maxdd_vs_baseline",
+                "delta_sharpe_vs_full_classifier",
+            ]
+        ].to_string(index=False)
+    )
+    print()
+    print("VIXY friction sensitivity:")
+    print("  Note: yfinance/free OHLC data does not provide historical bid/ask. These are explicit extra one-way slippage stress tests on VIXY turnover.")
+    print(
+        vixy_friction[
+            [
+                "vixy_extra_one_way_slippage_bps",
+                "sharpe",
+                "cagr",
+                "maxdd",
+                "delta_sharpe_vs_baseline",
+                "delta_cagr_vs_baseline",
+            ]
+        ].to_string(index=False)
+    )
+    print()
     print("Improvement concentration:")
     if concentration.empty:
         print("  none")
@@ -470,6 +584,8 @@ def main() -> int:
     print(f"Saved daily:   {args.out_daily}")
     print(f"Saved periods: {args.out_periods}")
     print(f"Saved LOO:     {args.out_loo}")
+    print(f"Saved clusters:{args.out_clusters}")
+    print(f"Saved friction:{args.out_vixy_friction}")
     print("=" * 100)
     return 0
 
