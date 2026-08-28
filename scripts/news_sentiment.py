@@ -319,6 +319,13 @@ def _default_result() -> dict[str, Any]:
     )
 
 
+def archive_raw_news_input(debug_path: Path, now_utc: dt.datetime, archive_dir: Path) -> Path:
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = archive_dir / f"news_input_{now_utc.date().isoformat()}.json"
+    archive_path.write_text(debug_path.read_text(encoding="utf-8"), encoding="utf-8")
+    return archive_path
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Daily macro-news sentiment scan via RSS + Claude")
     p.add_argument("--feeds", default=",".join(DEFAULT_FEEDS))
@@ -329,6 +336,7 @@ def main() -> int:
     p.add_argument("--api-key", default="")
     p.add_argument("--log-csv", default="artifacts/news/news_log.csv")
     p.add_argument("--debug-out", default="artifacts/news/news_last_input.json")
+    p.add_argument("--raw-archive-dir", default="artifacts/news/raw_inputs")
     args = p.parse_args()
 
     now_utc = dt.datetime.now(dt.timezone.utc)
@@ -383,6 +391,7 @@ def main() -> int:
         ),
         encoding="utf-8",
     )
+    archive_raw_news_input(debug_path, now_utc, Path(args.raw_archive_dir))
 
     if not fresh_headlines:
         result = normalize_result(
