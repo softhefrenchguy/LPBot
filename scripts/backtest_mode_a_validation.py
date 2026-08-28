@@ -12,9 +12,9 @@ from backtest_continuous_regime_integrations import _apply_state_conviction, _lo
 from backtest_forex_optimised import _stats
 
 
-PRODUCTION_REFERENCE_SHARPE = 1.762
-PRODUCTION_WALKFORWARD_OOS = {2021: 1.947, 2022: -0.096, 2023: 0.191, 2024: 2.395}
-PRODUCTION_WALKFORWARD_AVG = 1.109
+PRODUCTION_REFERENCE_SHARPE = 1.660  # corrected uncosted headline (was 1.762 before the Sep2022-Mar2023 Binance USDC-pair data-gap fix)
+PRODUCTION_WALKFORWARD_OOS = {2021: 1.947, 2022: -0.133, 2023: 0.134, 2024: 2.396}  # corrected (was {2021: 1.947, 2022: -0.096, 2023: 0.191, 2024: 2.395} before the gap fix; 2021/2024 barely moved, 2022/2023 sit inside the corrected window and got worse)
+PRODUCTION_WALKFORWARD_AVG = 1.086  # corrected (was 1.109)
 
 NO_PANIC_SHRINK = {"risk_on": 1.0, "weakening": 0.85, "risk_off": 0.70, "panic": 1.0}
 SHRINK_PANIC = {"risk_on": 1.0, "weakening": 0.85, "risk_off": 0.70, "panic": 0.50}
@@ -240,7 +240,7 @@ def _step3_volfilter_check(args: argparse.Namespace, d: pd.DataFrame, withvol_mo
 # alloc_eth/alloc_btc multiplication happens AFTER that cost is already subtracted,
 # and no cost is ever charged anywhere for alloc_eth/alloc_btc's OWN day-to-day
 # turnover. That's true of the baseline too (pre-existing, out of scope to retroactively
-# change -- it's what the accepted 1.762 reference already reflects), but it means
+# change -- it's what the accepted 1.660 reference already reflects), but it means
 # Mode A's state multiplier -- which changes alloc_eth/alloc_btc every time `state`
 # transitions between the 4 buckets -- is riding along cost-free. This isolates and
 # charges specifically the INCREMENTAL turnover Mode A adds on top of what the

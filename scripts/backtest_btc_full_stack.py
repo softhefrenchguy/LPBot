@@ -19,6 +19,37 @@ def _to_ms(ts: str) -> int:
     return int(pd.Timestamp(ts, tz="UTC").timestamp() * 1000)
 
 
+def _fill_symbol_gaps(d: pd.DataFrame, symbol: str, start: str, end: str) -> pd.DataFrame:
+    """Crypto trades every calendar day, so any missing daily bar inside [start, end] is a genuine
+    Binance data gap, not just a quiet weekend/holiday. Confirmed historically for ETHUSDC and BTCUSDC:
+    both have zero klines from 2022-09-30 to 2023-03-11 (Binance suspended/delisted these USDC pairs for
+    that window; verified directly against the raw klines endpoint, tvlUSD-style history is unaffected).
+    Backfill any such gap from the equivalent *USDT symbol, which traded continuously throughout."""
+    if d.empty or not symbol.upper().endswith("USDC"):
+        return d
+    full_days = pd.date_range(pd.Timestamp(start, tz="UTC").floor("D"), pd.Timestamp(end, tz="UTC").floor("D"), freq="D")
+    have_days = set(d["timestamp"].dt.floor("D"))
+    missing_days = [ts for ts in full_days if ts not in have_days]
+    if not missing_days:
+        return d
+    proxy_symbol = symbol.upper()[:-4] + "USDT"
+    gap_start = (min(missing_days) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    gap_end = (max(missing_days) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    fill = _download_binance_daily(proxy_symbol, gap_start, gap_end)
+    if fill.empty:
+        return d
+    fill = fill[fill["timestamp"].dt.floor("D").isin(missing_days)]
+    if fill.empty:
+        return d
+    print(
+        f"[_download_binance_daily] {symbol}: filled {len(fill)} missing day(s) "
+        f"({fill['timestamp'].min().date()} to {fill['timestamp'].max().date()}) using {proxy_symbol} as a proxy "
+        f"(Binance has no {symbol} klines for this window)."
+    )
+    combined = pd.concat([d, fill], ignore_index=True).sort_values("timestamp")
+    return combined.drop_duplicates(subset="timestamp", keep="first").reset_index(drop=True)
+
+
 def _download_binance_daily(symbol: str, start: str, end: str) -> pd.DataFrame:
     start_ms = _to_ms(start)
     end_ms = _to_ms(end)
@@ -71,7 +102,8 @@ def _download_binance_daily(symbol: str, start: str, end: str) -> pd.DataFrame:
         d[c] = pd.to_numeric(d[c], errors="coerce")
     d = d.dropna(subset=["timestamp", "open", "close"]).sort_values("timestamp")
     d = d[(d["timestamp"] >= pd.Timestamp(start, tz="UTC")) & (d["timestamp"] <= pd.Timestamp(end, tz="UTC"))]
-    return d[["timestamp", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
+    d = d[["timestamp", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
+    return _fill_symbol_gaps(d, symbol, start, end)
 
 
 def smooth_short_islands(labels: pd.Series, min_persistence: int) -> pd.Series:
