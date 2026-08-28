@@ -1,0 +1,14 @@
+{
+  "timestamp_withdraw": "2025-11-03 12:26:33 UTC",
+  "timestamp_create": "2025-11-03 12:12:52 UTC",
+  "fees_collected_usd": 0.0,
+  "pnl_usd": -0.02,
+  "cycle_profit_usd": -0.01,
+  "range_width": 5,
+  "logged_at": "2025-11-03 12:26:52 UTC",
+  "updated_at": "2025-11-03 12:26:52 UTC",
+  "last_created_token_id": 5048140,
+  "cycle_duration_min": 1.7,
+  "failed_token_ids": [],
+  "withdraw_ok": true
+}

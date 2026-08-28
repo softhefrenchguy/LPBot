@@ -1,0 +1,17 @@
+{
+  "ema": 2943.001867607069,
+  "ema_age_min": 2272.511267952144,
+  "last_price": 2950.5618003533104,
+  "last_recenter_ts": 1766666856.1393719,
+  "pending_recenter": false,
+  "pending_started_ts": null,
+  "lp_active": true,
+  "tokenId": 5177689,
+  "timestamp_create": "2025-12-25 12:47:43 UTC",
+  "lower_bound_usd": 2937.801092059947,
+  "upper_bound_usd": 2987.801092059947,
+  "range_width_usd": 50.0,
+  "price_usd": 2925.7249235613663,
+  "value_before_create": 999.0,
+  "virtual_weth": -0.3414538366046928
+}

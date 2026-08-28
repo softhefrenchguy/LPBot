@@ -1,0 +1,16 @@
+=== AI LP Regime Analysis Report ===
+
+Global performance:
+  cycles=53, win_rate=49.06%, avg_pnl=3.79, median_pnl=-0.35
+
+Panic-bottom overall:
+  cycles=18, win_rate=11.11%, avg_pnl=-10.75, median_pnl=-13.24
+
+
+Key AI recommendations:
+
+- In LOW volatility, 'panic_bottom' exits have poor performance (win_rate=20.00%, avg_pnl=-1.46). Recommendation: strongly reduce or disable panic_bottom in low vol regimes.
+- In NORMAL volatility, 'panic_bottom' exits are also weak (win_rate=7.69%, avg_pnl=-14.33). Recommendation: tighten panic logic (require larger EMA gap or stronger downside slope).
+- Most 'panic_bottom' exits with SMALL EMA gap (<0.2%%) are unprofitable (win_rate=10.00%, avg_pnl=-8.35). These are likely harmless wiggles. Recommendation: ignore panic signals when EMA gap is tiny.
+- 'band_top' exits are your strongest edge (win_rate=100.00%, avg_pnl=22.52). Recommendation: keep favouring asymmetric ranges that exit via band_top.
+- 'panic_bottom' is a net drag (win_rate=11.11%, avg_pnl=-10.75). Recommendation: treat panic as rare 'emergency only' instead of a normal exit path.

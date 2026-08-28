@@ -1,0 +1,48 @@
+{
+  "insights": {
+    "global": {
+      "count": 53,
+      "win_rate": 0.49056603773584906,
+      "avg_pnl": 3.786156603773585,
+      "median_pnl": -0.3465
+    },
+    "panic_bottom_overall": {
+      "count": 18,
+      "win_rate": 0.1111111111111111,
+      "avg_pnl": -10.752722222222223,
+      "median_pnl": -13.2406
+    },
+    "panic_bottom__vola_low_volatility": {
+      "count": 5,
+      "win_rate": 0.2,
+      "avg_pnl": -1.46274,
+      "median_pnl": -0.789
+    },
+    "panic_bottom__vola_normal_volatility": {
+      "count": 13,
+      "win_rate": 0.07692307692307693,
+      "avg_pnl": -14.325792307692309,
+      "median_pnl": -18.3592
+    },
+    "panic_bottom_small_gap": {
+      "count": 10,
+      "win_rate": 0.1,
+      "avg_pnl": -8.34784,
+      "median_pnl": -8.3324
+    },
+    "panic_bottom_medium_gap": {
+      "count": 8,
+      "win_rate": 0.125,
+      "avg_pnl": -13.758825,
+      "median_pnl": -18.51195
+    },
+    "panic_bottom_big_gap": null
+  },
+  "recommendations": [
+    "In LOW volatility, 'panic_bottom' exits have poor performance (win_rate=20.00%, avg_pnl=-1.46). Recommendation: strongly reduce or disable panic_bottom in low vol regimes.",
+    "In NORMAL volatility, 'panic_bottom' exits are also weak (win_rate=7.69%, avg_pnl=-14.33). Recommendation: tighten panic logic (require larger EMA gap or stronger downside slope).",
+    "Most 'panic_bottom' exits with SMALL EMA gap (<0.2%%) are unprofitable (win_rate=10.00%, avg_pnl=-8.35). These are likely harmless wiggles. Recommendation: ignore panic signals when EMA gap is tiny.",
+    "'band_top' exits are your strongest edge (win_rate=100.00%, avg_pnl=22.52). Recommendation: keep favouring asymmetric ranges that exit via band_top.",
+    "'panic_bottom' is a net drag (win_rate=11.11%, avg_pnl=-10.75). Recommendation: treat panic as rare 'emergency only' instead of a normal exit path."
+  ]
+}

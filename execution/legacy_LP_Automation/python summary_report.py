@@ -1,0 +1,42 @@
+# summary_report.py
+import json
+from datetime import datetime
+
+FILE = "cycle_history.jsonl"
+
+def load_cycles(file_path):
+    cycles = []
+    with open(file_path, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                cycles.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return cycles
+
+def main():
+    cycles = load_cycles(FILE)
+    if not cycles:
+        print("⚠️ No cycle data found.")
+        return
+
+    total_fees = sum(c.get("fees_collected_usd", 0) for c in cycles)
+    total_pnl = sum(c.get("pnl_usd", 0) for c in cycles)
+    total_profit = sum(c.get("cycle_profit_usd", 0) for c in cycles)
+    avg_profit = total_profit / len(cycles)
+    start_time = cycles[0].get("timestamp_create", "N/A")
+    end_time = cycles[-1].get("timestamp_withdraw", "N/A")
+
+    print("=======================================")
+    print("📊 LP Summary Report")
+    print("=======================================")
+    print(f"📆 Period: {start_time} → {end_time}")
+    print(f"🔁 Total Cycles:   {len(cycles)}")
+    print(f"💰 Total Fees:     +${total_fees:.2f}")
+    print(f"📉 Total PnL:      {total_pnl:+.2f} USD")
+    print(f"💹 Net Profit:     {total_profit:+.2f} USD")
+    print(f"⚙️  Avg Profit/Cycle: {avg_profit:+.2f} USD")
+    print("=======================================")
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,866 @@
+Eth LP alerts
+APP
+ — 26/11/2025 16:41
+🧾
+ LP Cycle #46 closed — ✅
+ WIN
+⏱
+ Duration: 1118.76 min
+💹
+ PnL: +52.3496 USDC (net +52.3403 after gas)
+💰
+ Value in:  $3464.41
+💰
+ Value out: $3516.76
+Eth LP alerts
+APP
+ — 26/11/2025 17:28
+🧾
+ LP Cycle #47 closed — ✅
+ WIN
+⏱
+ Duration: 46.39 min
+💹
+ PnL: +10.7197 USDC (net +10.6913 after gas)
+💰
+ Value in:  $3649.94
+💰
+ Value out: $3660.66
+Eth LP alerts
+APP
+ — 26/11/2025 17:41
+🧾
+ LP Cycle #48 closed — ✅
+ WIN
+⏱
+ Duration: 12.21 min
+💹
+ PnL: +10.1298 USDC (net +10.0668 after gas)
+💰
+ Value in:  $3934.91
+💰
+ Value out: $3945.04
+Eth LP alerts
+APP
+ — 26/11/2025 18:07
+🧾
+ LP Cycle #49 closed — ✅
+ WIN
+⏱
+ Duration: 25.90 min
+💹
+ PnL: +11.8643 USDC (net +11.8214 after gas)
+💰
+ Value in:  $3876.45
+💰
+ Value out: $3888.31
+Eth LP alerts
+APP
+ — 27/11/2025 02:21
+🧾
+ LP Cycle #50 closed — ✅
+ WIN
+⏱
+ Duration: 493.48 min
+💹
+ PnL: +35.4774 USDC (net +35.4609 after gas)
+💰
+ Value in:  $3239.86
+💰
+ Value out: $3275.34
+Eth LP alerts
+APP
+ — 27/11/2025 05:37
+🧾
+ LP Cycle #51 closed — ❌
+ LOSS
+⏱
+ Duration: 196.21 min
+💹
+ PnL: -22.9005 USDC (net -22.9101 after gas)
+💰
+ Value in:  $3956.75
+💰
+ Value out: $3933.85
+Eth LP alerts
+APP
+ — 28/11/2025 01:54
+🧾
+ LP Cycle #52 closed — ✅
+ PROFIT
+⏱ Duration: 1196.19 min
+💱
+ PnL: +16.4216 USDC (net +16.4122 after gas)
+💰
+ Value in: $3656.32
+💰
+ Value out: $3672.74
+28/11/2025 01:54
+Eth LP alerts
+APP
+ — 28/11/2025 08:50
+🧾
+ LP Cycle #53 closed — ✅
+ PROFIT
+⏱ Duration: 395.70 min
+💱
+ PnL: +19.0156 USDC (net +19.0011 after gas)
+💰
+ Value in: $3868.43
+💰
+ Value out: $3887.45
+28/11/2025 08:50
+Eth LP alerts
+APP
+ — 28/11/2025 09:09
+🧾
+ LP Cycle #54 closed — ✅
+ PROFIT
+⏱ Duration: 18.40 min
+💱
+ PnL: +2.6022 USDC (net +2.5867 after gas)
+💰
+ Value in: $2535.11
+💰
+ Value out: $2537.71
+28/11/2025 09:09
+Eth LP alerts
+APP
+ — 28/11/2025 11:14
+🧾
+ LP Cycle #55 closed — ❌
+ LOSS
+⏱ Duration: 124.44 min
+💱
+ PnL: -12.0439 USDC (net -12.0563 after gas)
+💰
+ Value in: $3712.82
+💰
+ Value out: $3700.78
+28/11/2025 11:14
+Eth LP alerts
+APP
+ — 28/11/2025 13:40
+🧾
+ LP Cycle #56 closed — ✅
+ PROFIT
+⏱ Duration: 125.66 min
+💱
+ PnL: +11.5691 USDC (net +11.5512 after gas)
+💰
+ Value in: $3719.83
+💰
+ Value out: $3731.40
+28/11/2025 13:40
+Eth LP alerts
+APP
+ — 28/11/2025 14:01
+🧾
+ LP Cycle #57 closed — ✅
+ PROFIT
+⏱ Duration: 20.20 min
+💱
+ PnL: +7.7865 USDC (net +7.7666 after gas)
+💰
+ Value in: $3982.30
+💰
+ Value out: $3990.09
+28/11/2025 14:01
+Eth LP alerts
+APP
+ — 28/11/2025 14:41
+🧾
+ LP Cycle #58 closed — ❌
+ LOSS
+⏱ Duration: 39.87 min
+💱
+ PnL: -9.7266 USDC (net -9.7762 after gas)
+💰
+ Value in: $3256.96
+💰
+ Value out: $3247.23
+28/11/2025 14:41
+Eth LP alerts
+APP
+ — 28/11/2025 16:21
+🧾
+ LP Cycle #59 closed — ❌
+ LOSS
+⏱ Duration: 79.73 min
+💱
+ PnL: -14.8284 USDC (net -14.8466 after gas)
+💰
+ Value in: $3821.06
+💰
+ Value out: $3806.23
+28/11/2025 16:21
+Eth LP alerts
+APP
+ — 28/11/2025 23:26
+🧾
+ LP Cycle #66 closed — ❌
+
+LOSS (reason: unknown)
+⏱ Duration: 33.77 min
+💱
+ PnL (wallet): -1.2330 USDC
+💰
+ LP in:  $3729.81
+💰
+ LP out: $3729.00
+Eth LP alerts
+APP
+ — 29/11/2025 02:33
+🧾
+ LP Cycle #67 closed — ❌
+
+LOSS (reason: soft_max_loss)
+⏱ Duration: 183.95 min
+💱
+ PnL (wallet): -2.1203 USDC
+💰
+ LP in:  $3215.72
+💰
+ LP out: $3216.20
+Eth LP alerts
+APP
+ — 29/11/2025 03:32
+🧾
+ LP Cycle #68 closed — ❌
+
+LOSS (reason: soft_max_loss)
+⏱ Duration: 58.49 min
+💱
+ PnL (wallet): -5.6947 USDC
+💰
+ LP in:  $3692.03
+💰
+ LP out: $3687.65
+Eth LP alerts
+APP
+ — 29/11/2025 04:59
+🧾
+ LP Cycle #69 closed — ✅
+
+PROFIT (reason: band_top)
+⏱ Duration: 86.82 min
+💱
+ PnL (wallet): +8.8105 USDC
+💰
+ LP in:  $3617.83
+💰
+ LP out: $3623.60
+Eth LP alerts
+APP
+ — 29/11/2025 05:51
+🧾
+ LP Cycle #70 closed — ❌
+
+LOSS (reason: soft_max_loss)
+⏱ Duration: 52.06 min
+💱
+ PnL (wallet): -5.8347 USDC
+💰
+ LP in:  $3538.94
+💰
+ LP out: $3534.78
+Eth LP alerts
+APP
+ — 29/11/2025 06:21
+🧾
+ LP Cycle #71 closed — ❌
+
+LOSS (reason: soft_max_loss)
+⏱ Duration: 29.02 min
+💱
+ PnL (wallet): -8.6017 USDC
+💰
+ LP in:  $3700.50
+💰
+ LP out: $3693.47
+Eth LP alerts
+APP
+ — 29/11/2025 06:35
+🧾
+ LP Cycle #72 closed — ❌
+
+LOSS (reason: panic_bottom)
+⏱ Duration: 13.02 min
+💱
+ PnL (wallet): -21.8448 USDC
+💰
+ LP in:  $3580.85
+💰
+ LP out: $3562.82
+Eth LP alerts
+APP
+ — 29/11/2025 14:59
+🧾
+ LP Cycle #73 closed — ❌
+
+LOSS (reason: unknown)
+⏱ Duration: 482.22 min
+💱
+ PnL (wallet): -5.5370 USDC
+💰
+ LP in:  $3669.92
+💰
+ LP out: $3666.87
+Eth LP alerts
+APP
+ — 29/11/2025 15:22
+🧾
+ LP Cycle #74 closed — ✅
+
+PROFIT (reason: band_top)
+⏱ Duration: 10.11 min
+💱
+ PnL (wallet): +22.2560 USDC
+💰
+ LP in:  $559.87
+💰
+ LP out: $560.63
+Eth LP alerts
+APP
+ — 29/11/2025 15:43
+🧾
+ LP Cycle #75 closed — ❌
+
+LOSS (reason: soft_max_loss)
+⏱ Duration: 20.12 min
+💱
+ PnL (wallet): -5.5785 USDC
+💰
+ LP in:  $3508.44
+💰
+ LP out: $3504.50
+Eth LP alerts
+APP
+ — 29/11/2025 18:13
+🧾
+ LP Cycle #78 closed — ❌
+ LOSS
+⏱
+ Duration: 27.94 min
+💱
+ PnL (wallet): -16.5440 USDC (after gas)
+💱
+ LP net PnL: -14.0049 USDC (after gas)
+💰
+ Value in:  $3,700.76
+💰
+ Value out: $3,686.77
+🧭
+ Exit reason: panic_bottom
+Eth LP alerts
+APP
+ — 29/11/2025 19:10
+🧾
+ LP Cycle #79 closed — ✅
+ PROFIT
+⏱
+ Duration: 36.21 min
+💱
+ PnL (wallet): +9.8797 USDC (after gas)
+💱
+ LP net PnL: +7.2262 USDC (after gas)
+💰
+ Value in:  $3,607.14
+💰
+ Value out: $3,614.38
+🧭
+ Exit reason: band_top
+Eth LP alerts
+APP
+ — 30/11/2025 08:22
+🧾
+ LP Cycle #80 closed — ✅
+ PROFIT
+⏱
+ Duration: 791.94 min
+💱
+ PnL (wallet): +24.0237 USDC (after gas)
+💱
+ LP net PnL: +21.4072 USDC (after gas)
+💰
+ Value in:  $3,468.73
+💰
+ Value out: $3,490.15
+🧭
+ Exit reason: band_top
+Eth LP alerts
+APP
+ — 30/11/2025 12:43
+🧾
+ LP Cycle #81 closed — ✅
+ PROFIT
+⏱
+ Duration: 260.80 min
+💱
+ PnL (wallet): +14.8289 USDC (after gas)
+💱
+ LP net PnL: +12.2555 USDC (after gas)
+💰
+ Value in:  $3,676.56
+💰
+ Value out: $3,688.83
+🧭
+ Exit reason: band_top
+Eth LP alerts
+APP
+ — 30/11/2025 13:21
+🧾
+ LP Cycle #82 closed — ✅
+ PROFIT
+⏱
+ Duration: 37.26 min
+💱
+ PnL (wallet): +8.1737 USDC (after gas)
+💱
+ LP net PnL: +7.0716 USDC (after gas)
+💰
+ Value in:  $3,956.07
+💰
+ Value out: $3,963.16
+🧭
+ Exit reason: band_top
+Eth LP alerts
+APP
+ — 30/11/2025 21:12
+🧾
+ LP Cycle #83 closed — ❌
+ LOSS
+⏱
+ Duration: 471.00 min
+💱
+ PnL (wallet): -10.2789 USDC (after gas)
+💱
+ LP net PnL: -7.8583 USDC (after gas)
+💰
+ Value in:  $3,848.26
+💰
+ Value out: $3,840.41
+🧭
+ Exit reason: panic_bottom
+Eth LP alerts
+APP
+ — 30/11/2025 23:37
+🧾
+ LP Cycle #84 closed — ❌
+ LOSS
+⏱
+ Duration: 124.68 min
+💱
+ PnL (wallet): -18.6647 USDC (after gas)
+💱
+ LP net PnL: -14.1068 USDC (after gas)
+💰
+ Value in:  $3,535.98
+💰
+ Value out: $3,521.89
+🧭
+ Exit reason: panic_bottom
+Eth LP alerts
+APP
+ — 01/12/2025 02:05
+🧾
+ LP Cycle #85 closed — ✅
+ PROFIT
+⏱
+ Duration: 60.48 min
+💱
+ PnL (wallet): +20.0084 USDC (after gas)
+💱
+ LP net PnL: +15.9671 USDC (after gas)
+💰
+ Value in:  $3,456.88
+💰
+ Value out: $3,472.87
+🧭
+ Exit reason: band_top
+Eth LP alerts
+APP
+ — 01/12/2025 02:37
+🧾
+ LP Cycle #86 closed — ❌
+ LOSS
+⏱
+ Duration: 31.96 min
+💱
+ PnL (wallet): -21.2381 USDC (after gas)
+💱
+ LP net PnL: -19.8477 USDC (after gas)
+💰
+ Value in:  $3,951.40
+💰
+ Value out: $3,931.57
+🧭
+ Exit reason: panic_bottom
+Eth LP alerts
+APP
+ — 01/12/2025 09:02
+🧾
+ LP Cycle #87 closed — ✅
+ PROFIT
+⏱
+ Duration: 320.03 min
+💱
+ PnL (wallet): +31.2285 USDC (after gas)
+💱
+ LP net PnL: +28.0933 USDC (after gas)
+💰
+ Value in:  $3,624.30
+💰
+ Value out: $3,652.41
+🧭
+ Exit reason: band_top
+Eth LP alerts
+APP
+ — 01/12/2025 09:20
+🧾
+ LP Cycle #88 closed — ❌
+ LOSS
+⏱
+ Duration: 18.39 min
+💱
+ PnL (wallet): -19.2403 USDC (after gas)
+💱
+ LP net PnL: -18.4638 USDC (after gas)
+💰
+ Value in:  $3,512.61
+💰
+ Value out: $3,494.17
+🧭
+ Exit reason: panic_bottom
+Eth LP alerts
+APP
+ — 01/12/2025 12:33
+🧾
+ LP Cycle #89 closed — ❌
+ LOSS
+⏱
+ Duration: 172.43 min
+💱
+ PnL (wallet): -19.1971 USDC (after gas)
+💱
+ LP net PnL: -17.5863 USDC (after gas)
+💰
+ Value in:  $3,921.73
+💰
+ Value out: $3,904.16
+🧭
+ Exit reason: panic_bottom
+Eth LP alerts
+APP
+ — 01/12/2025 15:16
+🧾
+ LP Cycle #90 closed — ❌
+ LOSS
+⏱
+ Duration: 142.49 min
+💱
+ PnL (wallet): -18.3592 USDC (after gas)
+💱
+ LP net PnL: -15.1681 USDC (after gas)
+💰
+ Value in:  $3,828.87
+💰
+ Value out: $3,813.79
+🧭
+ Exit reason: panic_bottom
+Eth LP alerts
+APP
+ — 01/12/2025 16:10
+🧾
+ LP Cycle #91 closed — ❌
+ LOSS
+⏱
+ Duration: 17.75 min
+💱
+ PnL (wallet): -29.3038 USDC (after gas)
+💱
+ LP net PnL: -22.2692 USDC (after gas)
+💰
+ Value in:  $3,380.65
+💰
+ Value out: $3,358.43
+🧭
+ Exit reason: panic_bottom
+Eth LP alerts
+APP
+ — Yesterday at 08:31
+🧾
+ LP Cycle #92 closed — ✅
+ PROFIT
+⏱
+ Duration: 661.21 min
+💱
+ PnL (wallet): +14.6275 USDC (after gas)
+💱
+ LP net PnL: +14.7075 USDC (after gas)
+💰
+ Value in:  $1,973.96
+💰
+ Value out: $1,988.68
+🧭
+ Exit reason: panic_bottom
+Eth LP alerts
+APP
+ — Yesterday at 09:43
+🧾
+ LP Cycle #93 closed — ❌
+ LOSS
+⏱
+ Duration: 51.35 min
+💱
+ PnL (wallet): -0.7890 USDC (after gas)
+💱
+ LP net PnL: -0.7345 USDC (after gas)
+💰
+ Value in:  $1,979.94
+💰
+ Value out: $1,979.22
+🧭
+ Exit reason: panic_bottom
+Eth LP alerts
+APP
+ — Yesterday at 14:44
+🧾
+ LP Cycle #94 closed — ✅
+ PROFIT
+⏱
+ Duration: 280.89 min
+💱
+ PnL (wallet): +35.9158 USDC (after gas)
+💱
+ LP net PnL: +33.0589 USDC (after gas)
+💰
+ Value in:  $1,978.58
+💰
+ Value out: $2,011.70
+🧭
+ Exit reason: band_top
+Eth LP alerts
+APP
+ — Yesterday at 15:12
+🧾
+ LP Cycle #95 closed — ✅
+ PROFIT
+⏱
+ Duration: 28.11 min
+💱
+ PnL (wallet): +30.1668 USDC (after gas)
+💱
+ LP net PnL: +27.7396 USDC (after gas)
+💰
+ Value in:  $2,190.94
+💰
+ Value out: $2,218.82
+🧭
+ Exit reason: band_top
+Eth LP alerts
+APP
+ — Yesterday at 15:43
+🧾
+ LP Cycle #96 closed — ✅
+ PROFIT
+⏱
+ Duration: 30.27 min
+💱
+ PnL (wallet): +27.9941 USDC (after gas)
+💱
+ LP net PnL: +26.0801 USDC (after gas)
+💰
+ Value in:  $2,010.50
+💰
+ Value out: $2,036.74
+🧭
+ Exit reason: band_top
+Eth LP alerts
+APP
+ — Yesterday at 15:53
+🧾
+ LP Cycle #97 closed — ❌
+ LOSS
+⏱
+ Duration: 10.25 min
+💱
+ PnL (wallet): -1.1262 USDC (after gas)
+💱
+ LP net PnL: -1.2070 USDC (after gas)
+💰
+ Value in:  $2,024.92
+💰
+ Value out: $2,023.88
+🧭
+ Exit reason: panic_bottom
+Eth LP alerts
+APP
+ — Yesterday at 16:24
+🧾
+ LP Cycle #98 closed — ❌
+ LOSS
+⏱
+ Duration: 10.20 min
+💱
+ PnL (wallet): -16.2023 USDC (after gas)
+💱
+ LP net PnL: -15.4805 USDC (after gas)
+💰
+ Value in:  $2,022.32
+💰
+ Value out: $2,006.93
+🧭
+ Exit reason: panic_bottom
+Eth LP alerts
+APP
+ — Yesterday at 17:06
+🧾
+ LP Cycle #99 closed — ❌
+ LOSS
+⏱
+ Duration: 14.24 min
+💱
+ PnL (wallet): -0.3465 USDC (after gas)
+💱
+ LP net PnL: -0.3208 USDC (after gas)
+💰
+ Value in:  $2,015.02
+💰
+ Value out: $2,014.71
+🧭
+ Exit reason: panic_bottom
+Eth LP alerts
+APP
+ — Yesterday at 18:57
+🧾
+ LP Cycle #100 closed — ✅
+ PROFIT
+⏱
+ Duration: 91.21 min
+💱
+ PnL (wallet): +2.3346 USDC (after gas)
+💱
+ LP net PnL: +2.3895 USDC (after gas)
+💰
+ Value in:  $2,013.31
+💰
+ Value out: $2,015.71
+🧭
+ Exit reason: panic_bottom
+Eth LP alerts
+APP
+ — Yesterday at 19:51
+🧾
+ LP Cycle #101 closed — ❌
+ LOSS
+⏱
+ Duration: 32.23 min
+💱
+ PnL (wallet): -0.7114 USDC (after gas)
+💱
+ LP net PnL: -0.6709 USDC (after gas)
+💰
+ Value in:  $2,013.41
+💰
+ Value out: $2,012.75
+🧭
+ Exit reason: panic_bottom
+Eth LP alerts
+APP
+ — Yesterday at 20:58
+🧾
+ LP Cycle #102 closed — ❌
+ LOSS
+⏱
+ Duration: 10.22 min
+💱
+ PnL (wallet): -6.5029 USDC (after gas)
+💱
+ LP net PnL: -6.1884 USDC (after gas)
+💰
+ Value in:  $2,012.07
+💰
+ Value out: $2,005.89
+🧭
+ Exit reason: panic_bottom
+Eth LP alerts
+APP
+ — Yesterday at 23:05
+🧾
+ LP Cycle #103 closed — ✅
+ PROFIT
+⏱
+ Duration: 97.41 min
+💰
+ Value in (LP):  $2,008.11
+💰
+ Value out (LP): $2,025.02
+💱
+ LP net PnL (after gas): +16.8859 USDC
+💸
+ Fees this cycle: 3.3730 USDC
+💱
+ Wallet PnL after fees: +17.9139 USDC
+🧭
+ Exit reason: band_mid_recenter
+Eth LP alerts
+APP
+ — Yesterday at 23:38
+🧾
+ LP Cycle #104 closed — ❌
+ LOSS
+⏱
+ Duration: 32.56 min
+💰
+ Value in (LP):  $4,032.23
+💰
+ Value out (LP): $4,022.95
+💱
+ LP net PnL (after gas): -9.2970 USDC
+💸
+ Fees this cycle (sent): 0.3800 USDC
+💱
+ Wallet PnL after fees: -10.1619 USDC
+🧭
+ Exit reason: panic_bottom
+Eth LP alerts
+APP
+ — 02:12
+🧾
+ LP Cycle #105 closed — ✅
+ PROFIT
+⏱
+ Duration: 134.97 min
+💰
+ Value in (LP):  $4,013.08
+💰
+ Value out (LP): $4,050.80
+💱
+ LP net PnL (after gas): +37.6697 USDC
+💸
+ Fees this cycle (sent): 10.3207 USDC
+💱
+ Wallet PnL after fees: +30.2060 USDC
+🧭
+ Exit reason: band_top
+Eth LP alerts
+APP
+ — 06:04
+🧾
+ LP Cycle #106 closed — ✅
+ PROFIT
+⏱
+ Duration: 231.29 min
+💰
+ Value in (LP):  $4,039.70
+💰
+ Value out (LP): $4,082.21
+💱
+ LP net PnL (after gas): +42.4656 USDC
+💸
+ Fees this cycle (sent): 15.9261 USDC
+💱
+ Wallet PnL after fees: +29.2999 USDC
+🧭
+ Exit reason: band_top

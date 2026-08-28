@@ -1,0 +1,21 @@
+LP Automation History
+[16:51:18] Logged action: withdraw_liquidity
+[16:51:18] Logged action: rebalance_portfolio
+[16:51:19] Logged action: create_position
+[16:52:01] Logged action: withdraw_liquidity
+[16:52:01] Logged action: rebalance_portfolio
+[16:52:03] Logged action: create_position
+[17:07:29] Logged action: withdraw_liquidity
+[17:07:30] Logged action: rebalance_portfolio
+[17:07:30] Logged action: create_position
+[17:08:12] Logged action: withdraw_liquidity
+[17:08:12] Logged action: rebalance_portfolio
+[17:08:12] Logged action: create_position
+17:25:12 | withdraw_liquidity
+17:25:12 | collect_fees
+17:25:12 | rebalance_portfolio
+17:25:12 | create_position
+17:35:14 | withdraw_liquidity
+17:35:14 | collect_fees
+17:35:14 | rebalance_portfolio
+17:35:14 | create_position

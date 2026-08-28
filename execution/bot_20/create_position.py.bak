@@ -1,0 +1,245 @@
+import os
+from dotenv import load_dotenv
+
+env_path = os.path.join(os.path.dirname(__file__), ".env")
+load_dotenv(dotenv_path=env_path, override=True)
+import os
+from dotenv import load_dotenv
+
+env_path = os.path.join(os.path.dirname(__file__), ".env")
+load_dotenv(dotenv_path=env_path, override=True)
+import json, os, time, math
+from datetime import datetime
+from web3 import Web3
+from dotenv import load_dotenv
+load_dotenv()
+
+# ----------------------------
+# ⚙️ CONFIG
+# ----------------------------
+RPC_URL = "https://arb1.arbitrum.io/rpc"
+POSITION_MANAGER = Web3.to_checksum_address("0xC36442b4a4522E871399CD717aBDD847Ab11FE88")
+POOL_ADDRESS      = Web3.to_checksum_address("0xC6962004f452bE9203591991D15f6b388e09E8D0")  # WETH/USDC 0.05%
+
+# ----------------------------
+# 🔗 Connect
+# ----------------------------
+w3 = Web3(Web3.HTTPProvider(RPC_URL))
+if not w3.is_connected():
+    raise SystemExit("❌ Failed to connect to Arbitrum RPC")
+print("✅ Connected to Arbitrum!")
+
+WALLET_ADDRESS = Web3.to_checksum_address(os.getenv("WALLET_ADDRESS"))
+PRIVATE_KEY    = os.getenv("PRIVATE_KEY")
+
+# ----------------------------
+# 📄 ABIs & Contracts
+# ----------------------------
+script_dir = os.path.dirname(__file__)
+pm_abi    = json.load(open(os.path.join(script_dir, "NonfungiblePositionManager.json")))
+pool_abi  = json.load(open(os.path.join(script_dir, "pool_abi.json")))
+erc20_abi = json.load(open(os.path.join(script_dir, "erc20_abi.json")))
+pool_abi  = json.load(open("pool_abi.json"))
+erc20_abi = json.load(open("erc20_abi.json"))
+
+pm   = w3.eth.contract(address=POSITION_MANAGER, abi=pm_abi)
+pool = w3.eth.contract(address=POOL_ADDRESS, abi=pool_abi)
+
+# ----------------------------
+# 🔧 Helpers
+# ----------------------------
+def send(tx):
+    tx["from"] = WALLET_ADDRESS
+    tx["gas"] = 600_000
+    tx["maxFeePerGas"] = int(w3.eth.gas_price * 2)
+    tx["maxPriorityFeePerGas"] = int(w3.to_wei("0.01", "gwei"))
+    tx["nonce"] = w3.eth.get_transaction_count(WALLET_ADDRESS)
+    signed = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
+    txh = w3.eth.send_raw_transaction(signed.raw_transaction)
+    return w3.eth.wait_for_transaction_receipt(txh)
+
+def get_eth_price():
+    sqrtPriceX96 = pool.functions.slot0().call()[0]
+    return float((sqrtPriceX96 / (2 ** 96)) ** 2 * 1e12)  # USDC per WETH
+
+# ----------------------------
+# 💧 Create New LP Position
+# ----------------------------
+def main():
+    slot0 = pool.functions.slot0().call()
+    cur_tick = slot0[1]
+    spacing = pool.functions.tickSpacing().call()
+    tick_base = (cur_tick // spacing) * spacing
+
+    # Range ±width_ticks (default 20, or loaded from last_cycle_data.json)
+    width_ticks = 20
+    if os.path.exists("last_cycle_data.json"):
+        try:
+            with open("last_cycle_data.json") as f:
+                data = json.load(f)
+                width_ticks = int(data.get("range_width", 20))
+        except Exception:
+            pass
+
+    lower_tick = tick_base - width_ticks
+    upper_tick = tick_base + width_ticks
+    print(f"⚙️ Using live tick range: {lower_tick} → {upper_tick}")
+
+    # --- Token info ---
+    token0 = pool.functions.token0().call()
+    token1 = pool.functions.token1().call()
+    t0 = w3.eth.contract(address=token0, abi=erc20_abi)
+    t1 = w3.eth.contract(address=token1, abi=erc20_abi)
+    dec0, dec1 = t0.functions.decimals().call(), t1.functions.decimals().call()
+    sym0, sym1 = t0.functions.symbol().call(),   t1.functions.symbol().call()
+    bal0, bal1 = t0.functions.balanceOf(WALLET_ADDRESS).call(), t1.functions.balanceOf(WALLET_ADDRESS).call()
+
+    # Offer 95% of balances to the mint (unused gets refunded)
+    amt0_offer = int(bal0 * 0.95)
+    amt1_offer = int(bal1 * 0.95)
+    print(f"💼 Offering {amt0_offer/10**dec0:.6f} {sym0} + {amt1_offer/10**dec1:.6f} {sym1}")
+
+    # --- Portfolio analytics before LP (WETH/USDC only, on Arbitrum) ---
+    price_now = get_eth_price()
+    if sym0.upper() == "WETH":
+        weth_units = bal0 / 10**dec0
+        usdc_units = bal1 / 10**dec1
+    else:
+        weth_units = bal1 / 10**dec1
+        usdc_units = bal0 / 10**dec0
+
+    portfolio_value_usd = round(usdc_units + weth_units * price_now, 2)
+    value_before_create = portfolio_value_usd
+
+    print(f"🔎 Wallet snapshot → {weth_units:.6f} WETH + {usdc_units:.2f} USDC  |  ETH≈${price_now:.2f}")
+    print(f"📊 Starting portfolio value (WETH+USDC on Arbitrum): ${portfolio_value_usd}")
+
+    # --- Approvals (only if needed) ---
+    for token, amt in [(token0, amt0_offer), (token1, amt1_offer)]:
+        contract = w3.eth.contract(address=token, abi=erc20_abi)
+        if contract.functions.allowance(WALLET_ADDRESS, POSITION_MANAGER).call() < amt:
+            tx = contract.functions.approve(POSITION_MANAGER, amt).build_transaction({
+                "from": WALLET_ADDRESS,
+                "gas": 120_000,
+                "maxFeePerGas": int(w3.eth.gas_price * 2),
+                "maxPriorityFeePerGas": int(w3.to_wei("0.01", "gwei")),
+                "nonce": w3.eth.get_transaction_count(WALLET_ADDRESS)
+            })
+            send(tx)
+            print(f"✅ Approved {amt/10**18:.4f} for {token[:6]}…")
+
+    # --- Mint position ---
+    params = {
+        "token0": token0,
+        "token1": token1,
+        "fee": 500,
+        "tickLower": lower_tick,
+        "tickUpper": upper_tick,
+        "amount0Desired": amt0_offer,
+        "amount1Desired": amt1_offer,
+        "amount0Min": 0,
+        "amount1Min": 0,
+        "recipient": WALLET_ADDRESS,
+        "deadline": int(time.time()) + 600,
+    }
+    print("\n🔬 Mint params preview:\n", json.dumps(params, indent=2))
+
+    receipt = send(pm.functions.mint(params).build_transaction({"from": WALLET_ADDRESS}))
+    print(f"✅ LP position created! Tx hash: {receipt.transactionHash.hex()}")
+
+    # --- Extract tokenId and ACTUAL amounts used from Mint event ---
+    token_id = None
+    used0 = used1 = None
+    try:
+        events = pm.events.Mint().process_receipt(receipt)
+        if events:
+            ev = events[0]["args"]
+            token_id = int(ev["tokenId"])
+            used0 = int(ev.get("amount0", 0))
+            used1 = int(ev.get("amount1", 0))
+    except Exception:
+        pass
+
+    if token_id is None:
+        bal = pm.functions.balanceOf(WALLET_ADDRESS).call()
+        token_id = pm.functions.tokenOfOwnerByIndex(WALLET_ADDRESS, bal - 1).call()
+
+    if (used0 is None or used1 is None) or (used0 == 0 and used1 == 0):
+        try:
+            inc_events = pm.events.IncreaseLiquidity().process_receipt(receipt)
+            if inc_events:
+                a = inc_events[0]["args"]
+                used0 = int(a.get("amount0", 0))
+                used1 = int(a.get("amount1", 0))
+        except Exception:
+            pass
+
+    # --- Compute ACTUAL position value from used amounts ---
+    if sym0.upper() == "USDC":
+        used_usdc = (used0 or 0) / (10**dec0)
+        used_weth = (used1 or 0) / (10**dec1)
+    elif sym1.upper() == "USDC":
+        used_usdc = (used1 or 0) / (10**dec1)
+        used_weth = (used0 or 0) / (10**dec0)
+    else:
+        used_usdc = (used1 or 0) / (10**dec1)
+        used_weth = (used0 or 0) / (10**dec0)
+
+    position_value_usd = round(used_usdc + used_weth * price_now, 2)
+    print(f"💧 Position value actually deposited: ${position_value_usd} "
+          f"({used_usdc:.2f} USDC + {used_weth:.6f} WETH)")
+
+    # --- Centered USD bounds (±0.4%) ---
+    lower_usd = round(price_now * (1 - 0.004), 2)
+    upper_usd = round(price_now * (1 + 0.004), 2)
+
+    # --- Determine next cycle number ---
+    cycle_number = 1
+    if os.path.exists("cycle_history.jsonl"):
+        with open("cycle_history.jsonl", "r", encoding="utf-8") as f:
+            lines = f.readlines()
+            if lines:
+                try:
+                    last_cycle = json.loads(lines[-1])
+                    cycle_number = last_cycle.get("cycle_number", 0) + 1
+                except Exception:
+                    pass
+
+    # --- Save cycle state ---
+    data = {
+        "cycle_number": cycle_number,
+        "timestamp_create": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "range_width": width_ticks,
+        "lower_bound_usd": lower_usd,
+        "upper_bound_usd": upper_usd,
+        "lower_tick": lower_tick,
+        "upper_tick": upper_tick,
+        "tokenId": token_id,
+        "portfolio_value_usd": portfolio_value_usd,
+        "value_before_create": value_before_create,
+        "position_value_usd": position_value_usd,
+        "fees_usd": 0.0,
+        "pnl_usd": 0.0
+    }
+
+    # --- Ensure USD bounds always exist ---
+    if "lower_bound_usd" not in data or "upper_bound_usd" not in data:
+        try:
+            price_now = get_eth_price()
+            data["lower_bound_usd"] = round(price_now * (1 - 0.004), 2)
+            data["upper_bound_usd"] = round(price_now * (1 + 0.004), 2)
+            print(f"⚙️ Added fallback USD bounds → ${data['lower_bound_usd']} → ${data['upper_bound_usd']}")
+        except Exception as e:
+            print("⚠️ Could not compute fallback USD bounds:", e)
+            data["lower_bound_usd"] = 0
+            data["upper_bound_usd"] = 0
+
+    with open("last_cycle_data.json", "w") as f:
+        json.dump(data, f, indent=2)
+
+    print(f"🧾 Saved new centered range → ${lower_usd} → ${upper_usd}")
+    print(f"🌀 Cycle #{cycle_number} initiated.")
+    print("✅ create_position.py completed.\n")
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,16 @@
+{
+  "strong_up_gap_enter": 0.004,
+  "strong_up_gap_exit": 0.002,
+  "use_slope_filter": true,
+  "strong_up_slope_enter": 0.002,
+  "strong_up_slope_exit": 0.0005,
+  "band_top_stats": {
+    "median_pnl_usd": 0.0,
+    "median_duration_min": 86.82
+  },
+  "smart_recenter": {
+    "distance_below_band_min": 0.01,
+    "ema_stable_ticks": 10,
+    "cooldown_seconds": 30.0
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "ema_fast": 2959.511843102775,
+  "ema_slow": 2960.8187985279387,
+  "vol_ewma": 2.2270297698867672e-05,
+  "last_price": 2958.5560309800635,
+  "ema_age_min": 5324.781776849234,
+  "oor_up_count": 0,
+  "oor_down_count": 102,
+  "ema_consolidation_ticks": 102,
+  "osc_center": 2959.3502787192233,
+  "oscillations": 0,
+  "osc_pattern_ticks": 102,
+  "last_osc_side": -1,
+  "mode": "LP",
+  "tick_count": 337059,
+  "have_band_last": true,
+  "lp_active_last": true,
+  "last_log_ts": 1766494481.0095348,
+  "slope_up_ticks": 0
+}
