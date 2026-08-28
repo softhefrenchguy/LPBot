@@ -123,7 +123,9 @@ def _score_row(row: pd.Series) -> tuple[str, str, bool]:
     elif inflation_score >= 4 and panic_score < 4:
         assigned = "INFLATION_BEAR"
     elif geopolitical_score >= 4 and panic_score < 4 and inflation_score < 4:
-        assigned = "GEOPOLITICAL_BEAR"
+        # Still not deployment-grade from the observed sample, so keep it out of
+        # the actionable classifier until there is real validation.
+        assigned = "UNCLASSIFIED"
     elif panic_score >= 3:
         assigned = "PANIC_BEAR"
     elif inflation_score >= 3:
