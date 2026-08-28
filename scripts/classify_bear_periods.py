@@ -192,6 +192,9 @@ def main() -> int:
         "hindsight_asset_match",
         "all_inputs_no_lookahead",
     ]
+    for optional_col in ["dataset_tag", "source_note", "source_regime_csv", "source_regime_column"]:
+        if optional_col in major.columns and optional_col not in out_cols:
+            out_cols.append(optional_col)
     out = major[out_cols].copy()
 
     out_path = Path(args.out)

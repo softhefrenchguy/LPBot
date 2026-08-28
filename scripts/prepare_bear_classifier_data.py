@@ -67,6 +67,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--refresh", action="store_true", help="Refresh cached yfinance/FRED downloads.")
     p.add_argument("--cache-dir", default="artifacts/bear_classifier/cache")
     p.add_argument("--out", default="artifacts/bear_classifier/bear_period_classifier_inputs.csv")
+    p.add_argument("--dataset-tag", default="eth_btc_portfolio", help="Label for this regime source, e.g. btc_only_pre_eth.")
+    p.add_argument("--source-note", default="", help="Free-form note carried into the output for provenance.")
     return p.parse_args()
 
 
@@ -359,6 +361,8 @@ def main() -> int:
             ),
             "source_regime_csv": str(regime_path),
             "source_regime_column": args.regime_column,
+            "dataset_tag": str(args.dataset_tag),
+            "source_note": str(args.source_note),
             "vix_obs_date_known_at_start": "" if pd.isna(vix_obs_date) else vix_obs_date.date().isoformat(),
             "vix_at_start": vix_at_start,
             "vix_trend_approx_20d_at_start": vix_at_start - vix_20d_ago if np.isfinite(vix_at_start) and np.isfinite(vix_20d_ago) else np.nan,

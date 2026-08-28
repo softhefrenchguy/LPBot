@@ -67,23 +67,27 @@ def classify_v2(
     fwd_days: int,
     fwd_bear_th: float,
     fwd_bull_th: float,
+    close_col: str = "eth_close",
 ) -> pd.DataFrame:
     d = daily.copy()
-    d["ret_1d"] = np.log(d["eth_close"] / d["eth_close"].shift(1)).fillna(0.0)
-    d["ema20"] = d["eth_close"].ewm(span=20, adjust=False).mean()
-    d["ema50"] = d["eth_close"].ewm(span=50, adjust=False).mean()
-    d["ret_5d"] = d["eth_close"].pct_change(5)
-    d["ret_10d"] = d["eth_close"].pct_change(10)
-    d["rolling_dd"] = d["eth_close"] / d["eth_close"].rolling(int(dd_window), min_periods=max(5, dd_window // 2)).max() - 1.0
+    if close_col not in d.columns:
+        raise ValueError(f"daily frame missing close_col={close_col!r}")
+    px = pd.to_numeric(d[close_col], errors="coerce")
+    d["ret_1d"] = np.log(px / px.shift(1)).fillna(0.0)
+    d["ema20"] = px.ewm(span=20, adjust=False).mean()
+    d["ema50"] = px.ewm(span=50, adjust=False).mean()
+    d["ret_5d"] = px.pct_change(5)
+    d["ret_10d"] = px.pct_change(10)
+    d["rolling_dd"] = px / px.rolling(int(dd_window), min_periods=max(5, dd_window // 2)).max() - 1.0
 
     bull_raw = (
-        (d["eth_close"] > d["ema20"])
+        (px > d["ema20"])
         & (d["ema20"] > d["ema50"])
         & (d["ret_5d"] > 0.0)
         & (d["ret_10d"] > 0.0)
     )
     bear_raw = (
-        (d["eth_close"] < d["ema20"])
+        (px < d["ema20"])
         & (d["ema20"] < d["ema50"])
         & (d["ret_5d"] < 0.0)
     )
@@ -101,7 +105,7 @@ def classify_v2(
     d["regime_v2"] = d["regime_smoothed"].shift(1).fillna("CHOP")
 
     # Rule 3: forward-return labels for attribution only.
-    d["fwd_20d_return"] = d["eth_close"].pct_change(int(fwd_days)).shift(-int(fwd_days))
+    d["fwd_20d_return"] = px.pct_change(int(fwd_days)).shift(-int(fwd_days))
     d["regime_fwd_label"] = pd.cut(
         d["fwd_20d_return"],
         bins=[-np.inf, float(fwd_bear_th), float(fwd_bull_th), np.inf],
@@ -125,6 +129,10 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Regime classifier v2 with DD override + persistence + forward labels.")
     ap.add_argument("--eth-csv", default="data/ETHUSDC_5m.csv")
     ap.add_argument("--btc-csv", default="data/BTCUSDC_5m.csv")
+    ap.add_argument("--price-csv", default=None, help="Generic OHLCV CSV to classify instead of --eth-csv.")
+    ap.add_argument("--asset-name", default="eth", help="Asset name for --price-csv output columns, e.g. btc.")
+    ap.add_argument("--start", default=None, help="Optional start date filter after daily resampling.")
+    ap.add_argument("--end", default=None, help="Optional end date filter after daily resampling.")
     ap.add_argument("--dd-window", type=int, default=20)
     ap.add_argument("--dd-bear-th", type=float, default=-0.15)
     ap.add_argument("--min-persistence", type=int, default=5)
@@ -138,18 +146,35 @@ def main() -> None:
     ap.add_argument("--skip-html", action="store_true", help="Skip HTML report generation (no plotly required).")
     args = ap.parse_args()
 
-    eth = load_daily_close(Path(args.eth_csv), "eth")
-    if Path(args.btc_csv).exists():
-        btc = load_daily_close(Path(args.btc_csv), "btc")
-        daily = eth.join(btc, how="left")
-        daily["btc_close"] = daily["btc_close"].ffill()
+    asset_name = str(args.asset_name).strip().lower()
+    close_col = f"{asset_name}_close"
+    regime_col = f"{asset_name}_regime"
+
+    if args.price_csv:
+        primary = load_daily_close(Path(args.price_csv), asset_name)
+        daily = primary.dropna(subset=[close_col]).copy()
     else:
-        daily = eth.copy()
-        daily["btc_close"] = np.nan
-    daily = daily.dropna(subset=["eth_close"]).copy()
+        asset_name = "eth"
+        close_col = "eth_close"
+        regime_col = "eth_regime"
+        eth = load_daily_close(Path(args.eth_csv), "eth")
+        if Path(args.btc_csv).exists():
+            btc = load_daily_close(Path(args.btc_csv), "btc")
+            daily = eth.join(btc, how="left")
+            daily["btc_close"] = daily["btc_close"].ffill()
+        else:
+            daily = eth.copy()
+            daily["btc_close"] = np.nan
+        daily = daily.dropna(subset=["eth_close"]).copy()
+
+    if args.start:
+        daily = daily[daily.index >= pd.to_datetime(args.start, utc=True)]
+    if args.end:
+        daily = daily[daily.index <= pd.to_datetime(args.end, utc=True)]
 
     cls = classify_v2(
         daily=daily,
+        close_col=close_col,
         dd_window=int(args.dd_window),
         dd_bear_th=float(args.dd_bear_th),
         min_persistence=int(args.min_persistence),
@@ -158,6 +183,7 @@ def main() -> None:
         fwd_bull_th=float(args.fwd_bull_th),
     ).reset_index().rename(columns={"index": "day", "timestamp": "day"})
     cls["day"] = pd.to_datetime(cls["day"], utc=True, errors="coerce")
+    cls[regime_col] = cls["regime_v2"]
 
     # Check 2: label distribution.
     dist = cls["regime_v2"].value_counts(normalize=True).mul(100).reindex(REGIMES, fill_value=0.0)
@@ -188,10 +214,10 @@ def main() -> None:
         import plotly.graph_objects as go
         from plotly.subplots import make_subplots
 
-        fig = make_subplots(rows=3, cols=1, shared_xaxes=True, subplot_titles=["ETH/BTC Price + Regime", "Forward 20d Return", "Rolling DD"])
-        fig.add_trace(go.Scatter(x=cls["day"], y=cls["eth_close"], name="ETH Close", line=dict(color="#2ca02c")), row=1, col=1)
-        if cls["btc_close"].notna().any():
-            b = cls["btc_close"] / cls["btc_close"].iloc[0] * cls["eth_close"].iloc[0]
+        fig = make_subplots(rows=3, cols=1, shared_xaxes=True, subplot_titles=[f"{asset_name.upper()} Price + Regime", "Forward 20d Return", "Rolling DD"])
+        fig.add_trace(go.Scatter(x=cls["day"], y=cls[close_col], name=f"{asset_name.upper()} Close", line=dict(color="#2ca02c")), row=1, col=1)
+        if "btc_close" in cls.columns and cls["btc_close"].notna().any() and close_col != "btc_close":
+            b = cls["btc_close"] / cls["btc_close"].iloc[0] * cls[close_col].iloc[0]
             fig.add_trace(go.Scatter(x=cls["day"], y=b, name="BTC Close (scaled)", line=dict(color="#1f77b4")), row=1, col=1)
 
         for rg, color in [("BULL", "rgba(46,204,113,0.10)"), ("BEAR", "rgba(231,76,60,0.10)"), ("CHOP", "rgba(149,165,166,0.08)")]:
