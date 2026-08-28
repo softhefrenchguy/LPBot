@@ -9,6 +9,32 @@ from urllib.request import urlopen
 import numpy as np
 import pandas as pd
 
+"""
+Prepare no-look-ahead inputs for a later rules-based BEAR type classifier.
+
+This script does not classify bear type and does not backtest any new logic. It
+extracts each LPBot BEAR segment, aligns macro inputs exactly as they would have
+been knowable on the segment start date, and appends hindsight scoring targets.
+
+No-look-ahead input definitions:
+- vix_at_start: latest available VIX close on or before bear_start only. It is
+  not an average, max, or peak from inside the bear window.
+- vix_trend_approx_20d_at_start: vix_at_start minus the latest VIX close on or
+  before bear_start - 28 calendar days. This approximates 20 trading days.
+- CPI: latest CPI observation whose assumed release date is <= bear_start. The
+  release date is modelled conservatively as observation month-end + 14 days.
+- Credit spread: latest FRED credit observation on or before bear_start.
+
+Hindsight definitions:
+- *_return_over_bear_period_hindsight: proxy asset close-to-close return from
+  bear_start to bear_end.
+- best_hindsight_asset_return_over_bear_period: asset with the highest of those
+  hindsight returns. This is only for later rule scoring; it is not an input.
+- underlying_peak_to_trough_pct: worst peak-to-trough drawdown of the LPBot
+  underlying close series inside the BEAR segment. Used only for tagging
+  major_bear vs minor_dip.
+"""
+
 
 DEFAULT_REGIME_PATHS = [
     Path("artifacts/backtest/extended_overlay_daily.csv"),
@@ -34,6 +60,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--regime-csv", default=None, help="LPBot daily CSV with eth_regime/btc_regime columns.")
     p.add_argument("--regime-column", default="eth_regime", help="Regime column to segment, default eth_regime.")
     p.add_argument("--min-bear-days", type=int, default=3, help="Drop very short BEAR runs below this length.")
+    p.add_argument("--major-min-days", type=int, default=30, help="Major bear requires at least this many days.")
+    p.add_argument("--major-min-drawdown", type=float, default=0.10, help="Major bear requires at least this peak-to-trough drawdown.")
     p.add_argument("--start", default=None, help="Optional start date filter.")
     p.add_argument("--end", default=None, help="Optional end date filter.")
     p.add_argument("--refresh", action="store_true", help="Refresh cached yfinance/FRED downloads.")
@@ -147,6 +175,52 @@ def _bear_periods(d: pd.DataFrame, regime_col: str, min_days: int) -> pd.DataFra
     return pd.DataFrame(rows)
 
 
+def _underlying_close_column(regime_col: str, d: pd.DataFrame) -> str | None:
+    prefix = regime_col.removesuffix("_regime")
+    preferred = f"{prefix}_close"
+    if preferred in d.columns:
+        return preferred
+    for candidate in ["eth_close", "btc_close", "close"]:
+        if candidate in d.columns:
+            return candidate
+    return None
+
+
+def _underlying_magnitude(
+    regimes: pd.DataFrame,
+    close_col: str | None,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> dict[str, float | str]:
+    if close_col is None:
+        return {
+            "underlying_close_column": "",
+            "underlying_start_to_trough_pct": np.nan,
+            "underlying_peak_to_trough_pct": np.nan,
+        }
+    window = regimes[(regimes["date"] >= start) & (regimes["date"] <= end)].copy()
+    px = pd.to_numeric(window[close_col], errors="coerce").dropna()
+    if px.empty:
+        return {
+            "underlying_close_column": close_col,
+            "underlying_start_to_trough_pct": np.nan,
+            "underlying_peak_to_trough_pct": np.nan,
+        }
+
+    start_px = float(px.iloc[0])
+    trough_px = float(px.min())
+    start_to_trough = trough_px / start_px - 1.0 if start_px > 0 else np.nan
+
+    running_peak = px.cummax()
+    dd = px / running_peak - 1.0
+    peak_to_trough = float(dd.min()) if not dd.empty else np.nan
+    return {
+        "underlying_close_column": close_col,
+        "underlying_start_to_trough_pct": float(start_to_trough),
+        "underlying_peak_to_trough_pct": peak_to_trough,
+    }
+
+
 def _asof_value(d: pd.DataFrame, date: pd.Timestamp, col: str = "close") -> tuple[float, pd.Timestamp | pd.NaT]:
     x = d[d["date"] <= date]
     if x.empty:
@@ -254,12 +328,15 @@ def main() -> int:
         for name, symbol in YF_SYMBOLS.items()
     }
     cpi, credit = _prepare_fred(_download_fred(cache_dir / "fred_cpi_credit.csv", args.refresh))
+    close_col = _underlying_close_column(args.regime_column, regimes)
 
     rows = []
     for _, period in periods.iterrows():
         start = period["bear_start"]
         end = period["bear_end"]
-        vix_level, vix_obs_date = _asof_value(yf_data["vix"], start)
+        duration_days = int(period["bear_days"])
+        magnitude = _underlying_magnitude(regimes, close_col, start, end)
+        vix_at_start, vix_obs_date = _asof_value(yf_data["vix"], start)
         vix_20d_ago, _ = _asof_value(yf_data["vix"], start - pd.Timedelta(days=28))
         defensive_returns = {
             "gold": _price_return(yf_data["gold"], start, end),
@@ -270,20 +347,29 @@ def main() -> int:
         row = {
             "bear_start": start.date().isoformat(),
             "bear_end": end.date().isoformat(),
-            "bear_days": int(period["bear_days"]),
+            "duration_days": duration_days,
+            "bear_days": duration_days,
+            **magnitude,
+            "bear_scale": (
+                "major_bear"
+                if duration_days >= args.major_min_days
+                and np.isfinite(float(magnitude["underlying_peak_to_trough_pct"]))
+                and abs(float(magnitude["underlying_peak_to_trough_pct"])) >= args.major_min_drawdown
+                else "minor_dip"
+            ),
             "source_regime_csv": str(regime_path),
             "source_regime_column": args.regime_column,
             "vix_obs_date_known_at_start": "" if pd.isna(vix_obs_date) else vix_obs_date.date().isoformat(),
-            "vix_level_known_at_start": vix_level,
-            "vix_trend_approx_20d_known_at_start": vix_level - vix_20d_ago if np.isfinite(vix_level) and np.isfinite(vix_20d_ago) else np.nan,
+            "vix_at_start": vix_at_start,
+            "vix_trend_approx_20d_at_start": vix_at_start - vix_20d_ago if np.isfinite(vix_at_start) and np.isfinite(vix_20d_ago) else np.nan,
             "vix_no_lookahead": bool((not pd.isna(vix_obs_date)) and vix_obs_date <= start),
             **_cpi_at_start(cpi, start),
             **_credit_at_start(credit, start),
-            "gold_return_hindsight": defensive_returns["gold"],
-            "energy_return_hindsight": defensive_returns["energy"],
-            "usd_return_hindsight": defensive_returns["usd"],
-            "vix_return_hindsight": defensive_returns["vix"],
-            "best_defensive_asset_hindsight": _best_defensive_asset(defensive_returns),
+            "gold_return_over_bear_period_hindsight": defensive_returns["gold"],
+            "energy_return_over_bear_period_hindsight": defensive_returns["energy"],
+            "usd_return_over_bear_period_hindsight": defensive_returns["usd"],
+            "vix_return_over_bear_period_hindsight": defensive_returns["vix"],
+            "best_hindsight_asset_return_over_bear_period": _best_defensive_asset(defensive_returns),
         }
         row["all_inputs_no_lookahead"] = bool(
             row["vix_no_lookahead"] and row["cpi_no_lookahead"] and row["credit_no_lookahead"]
@@ -304,12 +390,16 @@ def main() -> int:
     print(f"Saved: {out_path}")
     print()
     cols = [
-        "bear_start", "bear_end", "bear_days",
-        "vix_level_known_at_start", "vix_trend_approx_20d_known_at_start",
+        "bear_start", "bear_end", "duration_days", "bear_scale",
+        "underlying_start_to_trough_pct", "underlying_peak_to_trough_pct",
+        "vix_at_start", "vix_trend_approx_20d_at_start",
         "cpi_yoy_known_at_start", "cpi_yoy_trend_3m_known_at_start",
         "credit_spread_known_at_start", "credit_spread_trend_20obs_known_at_start",
-        "gold_return_hindsight", "energy_return_hindsight", "usd_return_hindsight",
-        "best_defensive_asset_hindsight", "all_inputs_no_lookahead",
+        "gold_return_over_bear_period_hindsight",
+        "energy_return_over_bear_period_hindsight",
+        "usd_return_over_bear_period_hindsight",
+        "best_hindsight_asset_return_over_bear_period",
+        "all_inputs_no_lookahead",
     ]
     print(out[cols].to_string(index=False))
     print("=" * 100)
