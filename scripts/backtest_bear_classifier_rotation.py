@@ -49,6 +49,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--out-summary", default="artifacts/bear_classifier/bear_classifier_rotation_summary.csv")
     p.add_argument("--out-daily", default="artifacts/bear_classifier/bear_classifier_rotation_daily.csv")
     p.add_argument("--out-periods", default="artifacts/bear_classifier/bear_classifier_rotation_periods.csv")
+    p.add_argument("--out-loo", default="artifacts/bear_classifier/bear_classifier_rotation_leave_one_out.csv")
     return p.parse_args()
 
 
@@ -154,6 +155,97 @@ def _build_period_assignments(bear_input: pd.DataFrame, classifications: pd.Data
     return periods
 
 
+def _apply_classifier_rotation(
+    daily_in: pd.DataFrame,
+    periods: pd.DataFrame,
+    vixy_ret: pd.Series,
+    uso_ret: pd.Series,
+    cost_bps: float,
+    defensive_cap: float,
+    gross_cap: float,
+    exclude_bear_start: str | None = None,
+) -> pd.DataFrame:
+    daily = daily_in.copy()
+    daily["classifier_asset"] = "gold_fallback"
+    daily["classifier_target_weight"] = 0.0
+    daily["classifier_asset_return"] = 0.0
+
+    used_cap = (daily["alloc_eth"].abs() + daily["alloc_btc"].abs()).clip(lower=0.0)
+    eligible_weight = (gross_cap - used_cap).clip(lower=0.0, upper=defensive_cap)
+
+    for _, p in periods.iterrows():
+        if exclude_bear_start is not None and str(p["bear_start"]) == exclude_bear_start:
+            continue
+        mask = _period_mask(daily["day"], p["bear_start"], p["bear_end"])
+        if not bool(p["classifier_actionable"]):
+            continue
+        if p["assigned_bear_type"] == "PANIC_BEAR":
+            daily.loc[mask, "classifier_asset"] = "vixy_long_vol"
+            daily.loc[mask, "classifier_asset_return"] = vixy_ret.loc[mask].to_numpy()
+        elif p["assigned_bear_type"] == "INFLATION_BEAR":
+            daily.loc[mask, "classifier_asset"] = "uso_energy"
+            daily.loc[mask, "classifier_asset_return"] = uso_ret.loc[mask].to_numpy()
+        daily.loc[mask, "classifier_target_weight"] = eligible_weight.loc[mask].to_numpy()
+
+    daily["classifier_defensive_weight"] = daily["classifier_target_weight"].shift(1).fillna(0.0)
+    prev_w = daily["classifier_defensive_weight"].shift(1).fillna(0.0)
+    daily["classifier_turnover"] = (daily["classifier_defensive_weight"] - prev_w).abs()
+    daily["classifier_cost"] = daily["classifier_turnover"] * (cost_bps / 10000.0)
+    replacement = daily["classifier_defensive_weight"] * daily["classifier_asset_return"] - daily["classifier_cost"]
+
+    fallback = daily["gold_strategy_return"]
+    actionable_mask = daily["classifier_asset"].isin(["vixy_long_vol", "uso_energy"])
+    daily["classifier_defensive_return"] = np.where(actionable_mask, replacement, fallback)
+    daily["base_ex_gold_return"] = daily["baseline_current_return"] - daily["gold_strategy_return"]
+    daily["classifier_return"] = daily["base_ex_gold_return"] + daily["classifier_defensive_return"]
+    return daily
+
+
+def _apply_dumb_blend(
+    daily_in: pd.DataFrame,
+    vixy_ret: pd.Series,
+    uso_ret: pd.Series,
+    cost_bps: float,
+) -> pd.DataFrame:
+    daily = daily_in.copy()
+    gold_active = daily["gold_weight_exec"].abs() > 1e-12
+    gold_weight = daily["gold_weight_exec"].where(gold_active, 0.0)
+    blend_weight = gold_weight
+    blend_asset_return = 0.5 * vixy_ret + 0.5 * uso_ret
+    prev_w = blend_weight.shift(1).fillna(0.0)
+    blend_turnover = (blend_weight - prev_w).abs()
+    blend_return = blend_weight * blend_asset_return - blend_turnover * (cost_bps / 10000.0)
+    daily["dumb_blend_return"] = daily["baseline_current_return"] - daily["gold_strategy_return"] + blend_return
+    daily["dumb_blend_weight"] = blend_weight
+    return daily
+
+
+def _apply_dumb_bear_idle_blend(
+    daily_in: pd.DataFrame,
+    periods: pd.DataFrame,
+    vixy_ret: pd.Series,
+    uso_ret: pd.Series,
+    cost_bps: float,
+    defensive_cap: float,
+    gross_cap: float,
+) -> pd.DataFrame:
+    daily = daily_in.copy()
+    used_cap = (daily["alloc_eth"].abs() + daily["alloc_btc"].abs()).clip(lower=0.0)
+    eligible_weight = (gross_cap - used_cap).clip(lower=0.0, upper=defensive_cap)
+    target = pd.Series(0.0, index=daily.index)
+    for _, p in periods.iterrows():
+        mask = _period_mask(daily["day"], p["bear_start"], p["bear_end"])
+        target.loc[mask] = eligible_weight.loc[mask].to_numpy()
+    exec_w = target.shift(1).fillna(0.0)
+    prev_w = exec_w.shift(1).fillna(0.0)
+    turnover = (exec_w - prev_w).abs()
+    blend_asset_return = 0.5 * vixy_ret + 0.5 * uso_ret
+    blend_return = exec_w * blend_asset_return - turnover * (cost_bps / 10000.0)
+    daily["dumb_bear_idle_blend_return"] = daily["baseline_current_return"] - daily["gold_strategy_return"] + blend_return
+    daily["dumb_bear_idle_blend_weight"] = exec_w
+    return daily
+
+
 def _summarise_periods(daily: pd.DataFrame, periods: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for _, p in periods.iterrows():
@@ -196,39 +288,18 @@ def main() -> int:
     vixy_ret = _asset_returns(daily, _download_prices("VIXY", start_ts, end_ts, cache_dir / "VIXY.csv", args.refresh), "vixy")
     uso_ret = _asset_returns(daily, _download_prices("USO", start_ts, end_ts, cache_dir / "USO.csv", args.refresh), "uso")
 
-    daily["classifier_asset"] = "gold_fallback"
-    daily["classifier_target_weight"] = 0.0
-    daily["classifier_asset_return"] = 0.0
-
-    used_cap = (daily["alloc_eth"].abs() + daily["alloc_btc"].abs()).clip(lower=0.0)
-    eligible_weight = (args.gross_cap - used_cap).clip(lower=0.0, upper=args.defensive_cap)
-
-    for _, p in periods.iterrows():
-        mask = _period_mask(daily["day"], p["bear_start"], p["bear_end"])
-        if not bool(p["classifier_actionable"]):
-            continue
-        if p["assigned_bear_type"] == "PANIC_BEAR":
-            daily.loc[mask, "classifier_asset"] = "vixy_long_vol"
-            daily.loc[mask, "classifier_asset_return"] = vixy_ret.loc[mask].to_numpy()
-        elif p["assigned_bear_type"] == "INFLATION_BEAR":
-            daily.loc[mask, "classifier_asset"] = "uso_energy"
-            daily.loc[mask, "classifier_asset_return"] = uso_ret.loc[mask].to_numpy()
-        daily.loc[mask, "classifier_target_weight"] = eligible_weight.loc[mask].to_numpy()
-
-    daily["classifier_defensive_weight"] = daily["classifier_target_weight"].shift(1).fillna(0.0)
-    prev_w = daily["classifier_defensive_weight"].shift(1).fillna(0.0)
-    daily["classifier_turnover"] = (daily["classifier_defensive_weight"] - prev_w).abs()
-    daily["classifier_cost"] = daily["classifier_turnover"] * (args.cost_bps / 10000.0)
-    replacement = daily["classifier_defensive_weight"] * daily["classifier_asset_return"] - daily["classifier_cost"]
-
-    fallback = daily["gold_strategy_return"]
-    actionable_mask = daily["classifier_asset"].isin(["vixy_long_vol", "uso_energy"])
-    daily["classifier_defensive_return"] = np.where(actionable_mask, replacement, fallback)
-    daily["base_ex_gold_return"] = daily["baseline_current_return"] - daily["gold_strategy_return"]
-    daily["classifier_return"] = daily["base_ex_gold_return"] + daily["classifier_defensive_return"]
+    daily = _apply_classifier_rotation(
+        daily, periods, vixy_ret, uso_ret, args.cost_bps, args.defensive_cap, args.gross_cap
+    )
+    dumb_daily = _apply_dumb_blend(daily, vixy_ret, uso_ret, args.cost_bps)
+    dumb_bear_idle_daily = _apply_dumb_bear_idle_blend(
+        daily, periods, vixy_ret, uso_ret, args.cost_bps, args.defensive_cap, args.gross_cap
+    )
 
     baseline_stats = _stats(daily["baseline_current_return"])
     classifier_stats = _stats(daily["classifier_return"])
+    dumb_stats = _stats(dumb_daily["dumb_blend_return"])
+    dumb_bear_idle_stats = _stats(dumb_bear_idle_daily["dumb_bear_idle_blend_return"])
     diff = classifier_stats["sharpe"] - baseline_stats["sharpe"]
 
     period_summary = _summarise_periods(daily, periods)
@@ -242,10 +313,44 @@ def main() -> int:
             concentration["classifier_minus_baseline"] / total_improvement if abs(total_improvement) > 1e-12 else np.nan
         )
 
+    loo_rows = []
+    for _, p in periods[periods["classifier_actionable"]].iterrows():
+        loo_daily = _apply_classifier_rotation(
+            _load_daily(Path(args.daily), args.start, args.end),
+            periods,
+            vixy_ret,
+            uso_ret,
+            args.cost_bps,
+            args.defensive_cap,
+            args.gross_cap,
+            exclude_bear_start=str(p["bear_start"]),
+        )
+        st = _stats(loo_daily["classifier_return"])
+        loo_rows.append(
+            {
+                "excluded_bear_start": p["bear_start"],
+                "excluded_bear_end": p["bear_end"],
+                "excluded_type": p["assigned_bear_type"],
+                "excluded_proxy": p["classifier_proxy"],
+                "sharpe": st["sharpe"],
+                "cagr": st["cagr"],
+                "maxdd": st["maxdd"],
+                "return": st["return"],
+                "delta_sharpe_vs_baseline": st["sharpe"] - baseline_stats["sharpe"],
+                "delta_cagr_vs_baseline": st["cagr"] - baseline_stats["cagr"],
+                "delta_maxdd_vs_baseline": st["maxdd"] - baseline_stats["maxdd"],
+                "delta_return_vs_baseline": st["return"] - baseline_stats["return"],
+                "delta_sharpe_vs_full_classifier": st["sharpe"] - classifier_stats["sharpe"],
+            }
+        )
+    loo = pd.DataFrame(loo_rows)
+
     summary = pd.DataFrame(
         [
             {"config": "baseline_gold_fallback", **baseline_stats},
             {"config": "classifier_panic_inflation", **classifier_stats},
+            {"config": "dumb_50_50_vixy_uso_when_gold_active", **dumb_stats},
+            {"config": "dumb_50_50_vixy_uso_all_bear_idle", **dumb_bear_idle_stats},
             {
                 "config": "delta_classifier_minus_baseline",
                 "return": classifier_stats["return"] - baseline_stats["return"],
@@ -255,6 +360,42 @@ def main() -> int:
                 "maxdd": classifier_stats["maxdd"] - baseline_stats["maxdd"],
                 "ann_vol": classifier_stats["ann_vol"] - baseline_stats["ann_vol"],
             },
+            {
+                "config": "delta_dumb_blend_minus_baseline",
+                "return": dumb_stats["return"] - baseline_stats["return"],
+                "cagr": dumb_stats["cagr"] - baseline_stats["cagr"],
+                "sharpe": dumb_stats["sharpe"] - baseline_stats["sharpe"],
+                "raw_sharpe": dumb_stats["raw_sharpe"] - baseline_stats["raw_sharpe"],
+                "maxdd": dumb_stats["maxdd"] - baseline_stats["maxdd"],
+                "ann_vol": dumb_stats["ann_vol"] - baseline_stats["ann_vol"],
+            },
+            {
+                "config": "delta_dumb_bear_idle_minus_baseline",
+                "return": dumb_bear_idle_stats["return"] - baseline_stats["return"],
+                "cagr": dumb_bear_idle_stats["cagr"] - baseline_stats["cagr"],
+                "sharpe": dumb_bear_idle_stats["sharpe"] - baseline_stats["sharpe"],
+                "raw_sharpe": dumb_bear_idle_stats["raw_sharpe"] - baseline_stats["raw_sharpe"],
+                "maxdd": dumb_bear_idle_stats["maxdd"] - baseline_stats["maxdd"],
+                "ann_vol": dumb_bear_idle_stats["ann_vol"] - baseline_stats["ann_vol"],
+            },
+            {
+                "config": "delta_classifier_minus_dumb_blend",
+                "return": classifier_stats["return"] - dumb_stats["return"],
+                "cagr": classifier_stats["cagr"] - dumb_stats["cagr"],
+                "sharpe": classifier_stats["sharpe"] - dumb_stats["sharpe"],
+                "raw_sharpe": classifier_stats["raw_sharpe"] - dumb_stats["raw_sharpe"],
+                "maxdd": classifier_stats["maxdd"] - dumb_stats["maxdd"],
+                "ann_vol": classifier_stats["ann_vol"] - dumb_stats["ann_vol"],
+            },
+            {
+                "config": "delta_classifier_minus_dumb_bear_idle",
+                "return": classifier_stats["return"] - dumb_bear_idle_stats["return"],
+                "cagr": classifier_stats["cagr"] - dumb_bear_idle_stats["cagr"],
+                "sharpe": classifier_stats["sharpe"] - dumb_bear_idle_stats["sharpe"],
+                "raw_sharpe": classifier_stats["raw_sharpe"] - dumb_bear_idle_stats["raw_sharpe"],
+                "maxdd": classifier_stats["maxdd"] - dumb_bear_idle_stats["maxdd"],
+                "ann_vol": classifier_stats["ann_vol"] - dumb_bear_idle_stats["ann_vol"],
+            },
         ]
     )
 
@@ -262,6 +403,7 @@ def main() -> int:
     summary.to_csv(args.out_summary, index=False)
     daily.to_csv(args.out_daily, index=False)
     period_summary.to_csv(args.out_periods, index=False)
+    loo.to_csv(args.out_loo, index=False)
 
     print("=" * 100)
     print("BEAR CLASSIFIER ROTATION BACKTEST")
@@ -269,6 +411,9 @@ def main() -> int:
     print(f"Window: {daily['day'].min().date()} to {daily['day'].max().date()}")
     print("Panic proxy: VIXY long-vol ETF. Inflation proxy: USO oil/energy ETF.")
     print("Minor dips and unclassified major bears: unchanged current gold fallback.")
+    print("Dumb baseline: replace every existing gold sleeve day with 50/50 VIXY/USO at the same weight.")
+    print("Dumb bear-idle baseline: buy 50/50 VIXY/USO on every BEAR period with idle defensive cap, no classifier.")
+    print(f"Existing gold active days in baseline file: {int((daily['gold_weight_exec'].abs() > 1e-12).sum())}")
     print()
     for _, row in summary.iterrows():
         print(
@@ -296,6 +441,25 @@ def main() -> int:
             ].to_string(index=False)
         )
     print()
+    print("Leave-one-actionable-period-out:")
+    if loo.empty:
+        print("  none")
+    else:
+        print(
+            loo[
+                [
+                    "excluded_bear_start",
+                    "excluded_bear_end",
+                    "excluded_type",
+                    "excluded_proxy",
+                    "delta_sharpe_vs_baseline",
+                    "delta_cagr_vs_baseline",
+                    "delta_maxdd_vs_baseline",
+                    "delta_sharpe_vs_full_classifier",
+                ]
+            ].to_string(index=False)
+        )
+    print()
     print("Improvement concentration:")
     if concentration.empty:
         print("  none")
@@ -305,6 +469,7 @@ def main() -> int:
     print(f"Saved summary: {args.out_summary}")
     print(f"Saved daily:   {args.out_daily}")
     print(f"Saved periods: {args.out_periods}")
+    print(f"Saved LOO:     {args.out_loo}")
     print("=" * 100)
     return 0
 
