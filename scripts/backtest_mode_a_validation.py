@@ -34,6 +34,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--out-walkforward", default="artifacts/backtest/mode_a_walkforward.csv")
     p.add_argument("--out-attribution", default="artifacts/backtest/mode_a_attribution.csv")
     p.add_argument("--out-volfilter-check", default="artifacts/backtest/mode_a_volfilter_check.csv")
+    p.add_argument("--out-rebalance-cost", default="artifacts/backtest/mode_a_rebalance_cost.csv")
     return p.parse_args()
 
 
@@ -228,6 +229,76 @@ def _step3_volfilter_check(args: argparse.Namespace, d: pd.DataFrame, withvol_mo
     ])
 
 
+# ---------------------------------------------------------------------------
+# Step 4: incremental rebalancing cost check.
+#
+# combined_return = alloc_eth*eth_strategy_return + alloc_btc*btc_strategy_return
+# + gold_strategy_return. eth_strategy_return/btc_strategy_return already have a
+# cost subtracted, but that cost is computed from weight_exec's OWN turnover (the
+# sleeve-level signal, pre-portfolio-normalization) -- see backtest_eth_btc_portfolio.py
+# run_sleeve(): cost = |weight_exec[t]-weight_exec[t-1]| * cost_bps/10000. The
+# alloc_eth/alloc_btc multiplication happens AFTER that cost is already subtracted,
+# and no cost is ever charged anywhere for alloc_eth/alloc_btc's OWN day-to-day
+# turnover. That's true of the baseline too (pre-existing, out of scope to retroactively
+# change -- it's what the accepted 1.762 reference already reflects), but it means
+# Mode A's state multiplier -- which changes alloc_eth/alloc_btc every time `state`
+# transitions between the 4 buckets -- is riding along cost-free. This isolates and
+# charges specifically the INCREMENTAL turnover Mode A adds on top of what the
+# baseline's own alloc_eth/alloc_btc turnover already is (from vol-filter/asym-sizing/
+# signal-split dynamics), so the baseline's own (already-accepted) cost treatment is
+# left untouched and only Mode A's new churn gets priced.
+# ---------------------------------------------------------------------------
+
+def _alloc_turnover(alloc_eth: pd.Series, alloc_btc: pd.Series) -> pd.Series:
+    return (alloc_eth - alloc_eth.shift(1).fillna(0.0)).abs() + (alloc_btc - alloc_btc.shift(1).fillna(0.0)).abs()
+
+
+def _step4_rebalancing_cost(d: pd.DataFrame, gross_cap: float, cost_bps: float) -> pd.DataFrame:
+    modeA_d = _apply_state_conviction(d, SHRINK_PANIC, gross_cap)
+
+    baseline_turnover = _alloc_turnover(d["alloc_eth"], d["alloc_btc"])
+    modeA_turnover = _alloc_turnover(modeA_d["alloc_eth"], modeA_d["alloc_btc"])
+    incremental_turnover = (modeA_turnover - baseline_turnover).clip(lower=0.0)
+
+    state_transitions = d["state"].ne(d["state"].shift(1))
+    incremental_days = incremental_turnover > 1e-9
+    years = d["day"].dt.year
+    per_year = pd.DataFrame({"year": years, "state_transitions": state_transitions.astype(int), "incremental_rebalance_days": incremental_days.astype(int)}).groupby("year").sum()
+    per_year = per_year[(per_year.index >= 2019) & (per_year.index <= 2024)]
+
+    print("Additional weight-change events Mode A introduces vs baseline, per year:")
+    print(per_year.to_string())
+    print(f"Average state transitions/year: {per_year['state_transitions'].mean():.1f}")
+    print(f"Average incremental (alloc actually changed beyond baseline) rebalance days/year: {per_year['incremental_rebalance_days'].mean():.1f}")
+    print()
+
+    modeA_ret_uncosted = _main_return(modeA_d, gross_cap, cost_bps)
+    additional_cost = incremental_turnover * (cost_bps / 10000.0)
+    modeA_ret_costed = modeA_ret_uncosted - additional_cost.values
+
+    stats_uncosted = _stats(modeA_ret_uncosted)
+    stats_costed = _stats(modeA_ret_costed)
+    total_additional_cost_pct = float(additional_cost.sum() * 100)
+
+    print(f"Total incremental turnover charged (sum of |alloc change| beyond baseline, 2019-2024): {float(incremental_turnover.sum()):.2f}")
+    print(f"Total additional cost from Mode A's own rebalancing @ {cost_bps:.0f}bps: {total_additional_cost_pct:.3f}% cumulative drag over the period")
+    print()
+    print(f"{'':45} {'Sharpe':>8} {'CAGR':>8} {'MaxDD':>8}")
+    print(f"{'Mode A, WITHOUT incremental rebalance cost':45} {stats_uncosted['sharpe']:>8.3f} {stats_uncosted['cagr']*100:>7.1f}% {stats_uncosted['maxdd']*100:>7.1f}%")
+    print(f"{'Mode A, WITH incremental rebalance cost':45} {stats_costed['sharpe']:>8.3f} {stats_costed['cagr']*100:>7.1f}% {stats_costed['maxdd']*100:>7.1f}%")
+    print(f"{'Production baseline (unchanged reference)':45} {PRODUCTION_REFERENCE_SHARPE:>8.3f}")
+    print()
+    still_positive = stats_costed["sharpe"] > PRODUCTION_REFERENCE_SHARPE
+    print(f"Verdict: Mode A {'STILL BEATS' if still_positive else 'NO LONGER BEATS'} the production baseline once its own incremental rebalancing is fully costed "
+          f"({stats_costed['sharpe']:.3f} vs {PRODUCTION_REFERENCE_SHARPE:.3f}).")
+
+    return pd.DataFrame([
+        {"config": "mode_a_uncosted_rebalance", "sharpe": stats_uncosted["sharpe"], "cagr": stats_uncosted["cagr"], "maxdd": stats_uncosted["maxdd"]},
+        {"config": "mode_a_with_incremental_rebalance_cost", "sharpe": stats_costed["sharpe"], "cagr": stats_costed["cagr"], "maxdd": stats_costed["maxdd"], "total_additional_cost_pct": total_additional_cost_pct},
+        {"config": "production_baseline_reference", "sharpe": PRODUCTION_REFERENCE_SHARPE},
+    ])
+
+
 def main() -> int:
     args = _parse_args()
     d = _load_d(args)
@@ -255,9 +326,16 @@ def main() -> int:
     volcheck_df.to_csv(args.out_volfilter_check, index=False)
     print()
 
+    print("STEP 4: Incremental rebalancing cost check (is Mode A's own state-transition churn actually costed?)")
+    print("-" * 110)
+    rebalance_df = _step4_rebalancing_cost(d, args.gross_cap, args.cost_bps)
+    rebalance_df.to_csv(args.out_rebalance_cost, index=False)
+    print()
+
     print("=" * 110)
     print(f"Saved: {args.out_walkforward}")
     print(f"Saved: {args.out_attribution}")
+    print(f"Saved: {args.out_rebalance_cost}")
     print(f"Saved: {args.out_volfilter_check}")
     print("=" * 110)
     return 0
