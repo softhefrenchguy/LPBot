@@ -104,11 +104,30 @@ def _normalise_price_frame(raw: pd.DataFrame) -> pd.DataFrame:
 
 
 def _download_yfinance(symbol: str, start: pd.Timestamp, end: pd.Timestamp, cache: Path, refresh: bool) -> pd.DataFrame:
-    if cache.exists() and not refresh:
-        d = pd.read_csv(cache)
-        d["date"] = pd.to_datetime(d["date"], utc=True, errors="coerce").dt.floor("D")
-        d["close"] = pd.to_numeric(d["close"], errors="coerce")
-        return d.dropna(subset=["date", "close"])
+    cached = pd.DataFrame(columns=["date", "close"])
+    if cache.exists():
+        cached = pd.read_csv(cache)
+        cached["date"] = pd.to_datetime(cached["date"], utc=True, errors="coerce").dt.floor("D")
+        cached["close"] = pd.to_numeric(cached["close"], errors="coerce")
+        cached = cached.dropna(subset=["date", "close"])
+
+    # A cache that doesn't actually cover the requested window is stale, not usable --
+    # returning it silently is exactly the failure mode that let this cache drift to
+    # 2015-02-17 while every caller kept requesting data through the present. Refetch
+    # (and merge, not overwrite) whenever coverage is insufficient, refresh or not.
+    covers_range = (
+        not cached.empty
+        and cached["date"].min() <= start
+        and cached["date"].max() >= end - pd.Timedelta(days=5)
+    )
+    if covers_range and not refresh:
+        return cached
+    if not cached.empty and not covers_range:
+        print(
+            f"[prepare_bear_classifier_data] {symbol} cache ({cache}) covers "
+            f"{cached['date'].min().date()}..{cached['date'].max().date()}, which does not cover the "
+            f"requested {start.date()}..{end.date()} -- refetching rather than silently using stale data."
+        )
 
     import yfinance as yf
 
@@ -122,7 +141,13 @@ def _download_yfinance(symbol: str, start: pd.Timestamp, end: pd.Timestamp, cach
     )
     if raw is None or raw.empty:
         raise RuntimeError(f"No yfinance data returned for {symbol}")
-    out = _normalise_price_frame(raw)
+    fetched = _normalise_price_frame(raw)
+    out = (
+        pd.concat([cached, fetched], ignore_index=True)
+        .dropna(subset=["date", "close"])
+        .sort_values("date")
+        .drop_duplicates("date", keep="last")
+    )
     cache.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(cache, index=False)
     return out
