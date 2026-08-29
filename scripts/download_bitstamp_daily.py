@@ -27,13 +27,13 @@ def _to_unix(date_str: str) -> int:
     return int(ts.timestamp())
 
 
-def download_daily(pair: str, start: str, end: str) -> pd.DataFrame:
+def _fetch_chunk(pair: str, start_ts: int, end_ts: int) -> list[dict[str, object]]:
     params = urlencode(
         {
             "step": 86400,
             "limit": 1000,
-            "start": _to_unix(start),
-            "end": _to_unix(end),
+            "start": start_ts,
+            "end": end_ts,
             "exclude_current_candle": "true",
         }
     )
@@ -41,11 +41,41 @@ def download_daily(pair: str, start: str, end: str) -> pd.DataFrame:
     req = Request(url, headers={"User-Agent": "LPBot research downloader"})
     raw = urlopen(req, timeout=30).read().decode("utf-8")
     payload = json.loads(raw)
-    rows = payload.get("data", {}).get("ohlc", [])
-    if not rows:
+    return payload.get("data", {}).get("ohlc", [])
+
+
+def download_daily(pair: str, start: str, end: str) -> pd.DataFrame:
+    start_ts = _to_unix(start)
+    end_ts = _to_unix(end)
+    # Bitstamp's OHLC endpoint returns at most `limit` (1000) rows, and when the
+    # requested [start, end] window spans more than that, it silently returns the
+    # MOST RECENT 1000 rows ending at `end` -- not the earliest 1000 from `start`.
+    # A single non-paginated request (the previous behaviour) silently truncated the
+    # front of any range longer than ~2.7 years with no error or warning. Page
+    # backward from `end` until coverage reaches `start` or a request stops making
+    # progress.
+    frames: list[pd.DataFrame] = []
+    cursor_end = end_ts
+    prev_earliest: int | None = None
+    while True:
+        rows = _fetch_chunk(pair, start_ts, cursor_end)
+        if not rows:
+            break
+        chunk = pd.DataFrame(rows)
+        raw_ts = pd.to_numeric(chunk["timestamp"], errors="coerce").dropna()
+        if raw_ts.empty:
+            break
+        earliest = int(raw_ts.min())
+        frames.append(chunk)
+        if earliest <= start_ts or (prev_earliest is not None and earliest >= prev_earliest):
+            break
+        prev_earliest = earliest
+        cursor_end = earliest - 1
+
+    if not frames:
         raise RuntimeError(f"No Bitstamp OHLC rows returned for {pair} {start}..{end}")
 
-    out = pd.DataFrame(rows)
+    out = pd.concat(frames, ignore_index=True)
     out["timestamp"] = pd.to_datetime(pd.to_numeric(out["timestamp"], errors="coerce"), unit="s", utc=True)
     for col in ["open", "high", "low", "close", "volume"]:
         out[col] = pd.to_numeric(out[col], errors="coerce")
