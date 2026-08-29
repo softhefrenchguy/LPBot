@@ -17,13 +17,13 @@ def main() -> int:
     ap.add_argument("--end", default="2024-12-31")
     ap.add_argument("--work-dir", default="artifacts/backtest/forex_optimised", help="Reuses the existing cached full-period production run here if present.")
     ap.add_argument("--out-summary", default="artifacts/backtest/production_walkforward.csv")
-    ap.add_argument("--cost-bps", type=float, default=20.0)
+    ap.add_argument("--cost-bps", type=float, default=60.0)  # was 20.0; corrected to match real Kraken taker fees at ~$1k-10k/month volume
     ap.add_argument("--refresh", action="store_true")
     args = ap.parse_args()
 
-    # _crypto_main(..., cost_bps=20.0) IS the exact production config: --vol-filter
+    # _crypto_main(..., cost_bps=60.0) IS the exact production config: --vol-filter
     # --transition-momentum --asymmetric-sizing --allocation-mode signal_weighted
-    # --cost-mode weight_change --cost-bps 20 --gross-cap 0.8 --eth-confirm-days 3
+    # --cost-mode weight_change --cost-bps 60 --gross-cap 0.8 --eth-confirm-days 3
     # --btc-confirm-days 5 --eth-ema 50,120,300 --btc-ema 15,40,120 --include-gold
     # --gold-symbol PAXG-USD --gold-ema 25,65,180 --gold-cap 0.3, plus the mean-reversion
     # CHOP overlay layered on top -- verified directly against source, not assumed.

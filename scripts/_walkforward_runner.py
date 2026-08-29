@@ -60,11 +60,11 @@ def _build_cmd(start: str, end: str, eth_ema: str, btc_ema: str, summary: Path, 
         "--eth-confirm-days", "3", "--btc-confirm-days", "5",
         "--vol-filter", "--transition-momentum",
         "--allocation-mode", "signal_weighted", "--gross-cap", "0.8",
-        "--cost-bps", "20", "--cost-mode", "weight_change",
+        "--cost-bps", "60", "--cost-mode", "weight_change",  # was 20; corrected to match real Kraken taker fees at ~$1k-10k/month volume
         "--out-summary-csv", str(summary), "--out-daily-csv", str(daily),
     ]
     if full_stack:
-        cmd += ["--asymmetric-sizing", "--include-gold", "--gold-symbol", "PAXG-USD", "--gold-ema", "25,65,180", "--gold-cap", "0.3", "--gold-cost-bps", "20"]
+        cmd += ["--asymmetric-sizing", "--include-gold", "--gold-symbol", "PAXG-USD", "--gold-ema", "25,65,180", "--gold-cap", "0.3", "--gold-cost-bps", "60"]
     return cmd
 
 
@@ -77,7 +77,7 @@ def run_backtest(start: str, end: str, eth_ema: str, btc_ema: str, work_dir: Pat
     if full_stack:
         base = pd.read_csv(daily, low_memory=False)
         base["day"] = pd.to_datetime(base["day"], utc=True, errors="coerce").dt.floor("D")
-        main_return = _apply_meanrev_overlay_series(base, gross_cap=0.8, cost_bps=20.0)
+        main_return = _apply_meanrev_overlay_series(base, gross_cap=0.8, cost_bps=60.0)  # was 20.0
         overlay_stats = _stats(main_return)
         row["combined_sharpe_no_overlay"] = row["combined_sharpe"]
         row["combined_sharpe"] = overlay_stats["sharpe"]
@@ -100,7 +100,7 @@ def run_oos_warm(test_start: str, test_end: str, eth_ema: str, btc_ema: str, wor
         _run_subprocess_with_retry(_build_cmd(TRUE_START, test_end, eth_ema, btc_ema, summary, daily, full_stack), f"{TRUE_START} to {test_end} (oos-warm), eth={eth_ema} btc={btc_ema}", retries)
     base = pd.read_csv(daily, low_memory=False)
     base["day"] = pd.to_datetime(base["day"], utc=True, errors="coerce").dt.floor("D")
-    main_return = _apply_meanrev_overlay_series(base, gross_cap=0.8, cost_bps=20.0) if full_stack else base["combined_return"]
+    main_return = _apply_meanrev_overlay_series(base, gross_cap=0.8, cost_bps=60.0) if full_stack else base["combined_return"]  # cost_bps was 20.0
     sliced = main_return[(base["day"] >= test_start) & (base["day"] <= test_end)]
     return _stats(sliced)
 

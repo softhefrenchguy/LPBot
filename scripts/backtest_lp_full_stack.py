@@ -13,8 +13,8 @@ from backtest_overlay_strategies import _mean_reversion_overlay  # noqa: E402
 from backtest_forex_optimised import _stats  # noqa: E402
 
 
-PRODUCTION_REFERENCE_SHARPE_UNCOSTED = 1.660
-PRODUCTION_REFERENCE_SHARPE_COSTED = 1.528
+PRODUCTION_REFERENCE_SHARPE_UNCOSTED = 1.510  # corrected for 60bps real Kraken cost (was 1.649 @ 20bps, 1.762 pre-gap-fix)
+PRODUCTION_REFERENCE_SHARPE_COSTED = 1.121  # corrected for 60bps real Kraken cost (was 1.521 @ 20bps, 1.633 pre-gap-fix)
 
 UNISWAP_V3_LAUNCH = pd.Timestamp("2021-05-05", tz="UTC")
 REAL_FEE_DATA_START = pd.Timestamp("2024-04-01", tz="UTC")  # subgraph volumeUSD coverage begins here (verified this session)
@@ -111,7 +111,7 @@ def main() -> int:
     ap.add_argument("--start", default="2019-01-01")
     ap.add_argument("--end", default="2024-12-31")
     ap.add_argument("--gross-cap", type=float, default=0.8)
-    ap.add_argument("--cost-bps", type=float, default=20.0)
+    ap.add_argument("--cost-bps", type=float, default=60.0)  # was 20.0
     ap.add_argument("--out-daily", default="artifacts/backtest/lp_full_stack_daily.csv")
     ap.add_argument("--out-yearly", default="artifacts/backtest/lp_full_stack_yearly.csv")
     args = ap.parse_args()

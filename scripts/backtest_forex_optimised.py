@@ -305,7 +305,7 @@ def main() -> int:
     ap.add_argument("--out-combined", default="artifacts/backtest/forex_optimised_combined.csv")
     ap.add_argument("--position-size", type=float, default=0.15)
     ap.add_argument("--cost-bps", type=float, default=2.0)
-    ap.add_argument("--crypto-cost-bps", type=float, default=20.0)
+    ap.add_argument("--crypto-cost-bps", type=float, default=60.0)  # was 20.0; corrected to match real Kraken taker fees (0.60%/leg) at ~$1k-10k/month trading volume, not the ~$25k-50k/month volume 20bps implied
     ap.add_argument("--refresh-data", action="store_true")
     ap.add_argument("--refresh-crypto", action="store_true")
     args = ap.parse_args()

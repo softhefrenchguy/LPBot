@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from _walkforward_runner import EMA_CANDIDATES, WINDOWS, optimise_window, run_oos_warm  # noqa: E402
 
 SIMPLIFIED_AVG_OOS_SHARPE = -0.010  # from the earlier (vol-filter + transition-momentum only) walk-forward
-PRODUCTION_FIXED_SHARPE = 1.109  # from the fixed-production-config walk-forward (no re-optimisation)
+PRODUCTION_FIXED_SHARPE = 0.938  # from the fixed-production-config walk-forward (no re-optimisation); corrected for 60bps real Kraken cost (was 1.144 @ 20bps, 1.109 stale even before that)
 
 
 def main() -> int:

@@ -2,7 +2,7 @@
   "allocation_mode": "signal_weighted",
   "gross_cap": 0.8,
   "cost_mode": "weight_change",
-  "cost_bps": 20,
+  "cost_bps": 60,
   "base_currency": "EUR",
   "eth_pair": "ETHEUR",
   "btc_pair": "XBTEUR",
@@ -51,19 +51,19 @@
   "mean_reversion_state_json": "artifacts/paper_trade/mean_reversion_overlay_state.json",
   "validated_reference": {
     "period": "2019-2024",
-    "cost_bps": 20,
+    "cost_bps": 60,
     "cost_mode": "weight_change",
     "allocation_mode": "signal_weighted",
     "gross_cap": 0.8,
     "config": "vol_filter + transition_momentum + ETH EMA 50/120/300 + BTC EMA 15/40/120 + PAXG EMA 25/65/180 + asymmetric_sizing + mean_reversion_overlay",
-    "sharpe": 1.762,
-    "cagr": 0.3978,
-    "max_dd": -0.1494,
+    "sharpe": 1.510,
+    "cagr": 0.3421,
+    "max_dd": -0.156,
     "ann_vol": 0.1631,
     "mean_reversion_overlay": {
-      "sharpe": 1.762,
-      "cagr": 0.3978,
-      "max_dd": -0.1494,
+      "sharpe": 1.510,
+      "cagr": 0.3421,
+      "max_dd": -0.156,
       "source": "artifacts/backtest/paxg_ema_grid.csv"
     },
     "eth_ema": [
@@ -85,9 +85,9 @@
   "validated_backtest": {
     "primary": {
       "period": "2019-2024",
-      "sharpe": 1.762,
-      "cagr": 0.3978,
-      "max_dd": -0.1494,
+      "sharpe": 1.510,
+      "cagr": 0.3421,
+      "max_dd": -0.156,
       "note": "ETH EMA 50/120/300, BTC EMA 15/40/120, PAXG EMA 25/65/180",
       "eth_ema": [
         50,

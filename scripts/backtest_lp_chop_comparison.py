@@ -17,7 +17,7 @@ from backtest_lp_full_stack import (  # noqa: E402
 
 WORK_DIR = Path("artifacts/backtest/forex_optimised")
 START, END = "2019-01-01", "2024-12-31"
-GROSS_CAP, COST_BPS = 0.8, 20.0
+GROSS_CAP, COST_BPS = 0.8, 60.0  # COST_BPS was 20.0
 
 
 def main() -> int:
@@ -149,8 +149,8 @@ def main() -> int:
     print()
     best = max(rows, key=lambda r: r["sharpe"])
     print(f"Best variant: {best['variant']} (Sharpe {best['sharpe']:.3f})")
-    print(f"Beats (a) CHOP-only baseline (1.660)? {best['sharpe'] > st_a['sharpe']}")
-    print(f"Beats (c) CHOP-first/LP-leftover (1.652)? {best['sharpe'] > st_c['sharpe']}")
+    print(f"Beats (a) CHOP-only baseline ({st_a['sharpe']:.3f})? {best['sharpe'] > st_a['sharpe']}")
+    print(f"Beats (c) CHOP-first/LP-leftover ({st_c['sharpe']:.3f})? {best['sharpe'] > st_c['sharpe']}")
     print()
 
     print("=" * 115)

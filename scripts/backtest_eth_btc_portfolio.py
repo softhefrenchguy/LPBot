@@ -183,6 +183,12 @@ def _sp500_macro_frame(start: str, end: str, out_csv: Path) -> pd.DataFrame:
         np.where((s["sp_ema21"] < s["sp_ema55"]) & (s["sp_ema55"] < s["sp_ema144"]), "BEAR", "CHOP"),
     )
     s["macro_multiplier"] = np.where(s["sp_regime"] == "BEAR", 0.5, 1.0)
+    # sp_regime/macro_multiplier are derived from day t's own S&P close, so they
+    # aren't knowable until after day t's close -- shift so they only apply
+    # starting day t+1 (not currently enabled in the production reference config,
+    # but fixed for consistency with the vol-filter/asymmetric-sizing fix above).
+    s["sp_regime"] = s["sp_regime"].shift(1).fillna("CHOP")
+    s["macro_multiplier"] = s["macro_multiplier"].shift(1).fillna(1.0)
     return s[["day", "sp_regime", "macro_multiplier"]].copy()
 
 
@@ -219,6 +225,13 @@ def _eth_vol_frame(eth_daily: pd.DataFrame) -> pd.DataFrame:
     v["vol_multiplier"] = 1.0
     v.loc[v["vol_percentile"] > 0.75, "vol_multiplier"] = 0.5
     v.loc[v["vol_percentile"] < 0.25, "vol_multiplier"] = 1.2
+    # These stats are only knowable after day t's own close, so they can only be
+    # applied to sizing starting day t+1 (same causal convention as weight_exec
+    # = weight_target.shift(1) below) -- without this shift, day t's vol_multiplier
+    # was being computed from day t's own close and applied to day t's position.
+    v["rolling_vol_20d"] = v["rolling_vol_20d"].shift(1)
+    v["vol_percentile"] = v["vol_percentile"].shift(1)
+    v["vol_multiplier"] = v["vol_multiplier"].shift(1)
     return v[["day", "rolling_vol_20d", "vol_percentile", "vol_multiplier"]].copy()
 
 
@@ -604,6 +617,10 @@ def run_sleeve(
     d["conviction_gap_score"] = np.select([gap_pct > 0.02, gap_pct >= 0.01], [0.33, 0.20], default=0.10)
     d["conviction_regime_score"] = d["regime_v2"].map({"BULL": 0.33, "CHOP": 0.17, "BEAR": 0.0}).fillna(0.0)
     d["conviction"] = d["conviction_gap_score"] + d["conviction_regime_score"]
+    # conviction_gap_score uses day t's own close/EMAs, so it isn't knowable until
+    # after day t's close -- shift so asymmetric-sizing (which consumes this
+    # column downstream) only ever applies it starting day t+1.
+    d["conviction"] = d["conviction"].shift(1).fillna(0.0)
 
     off_scale_map = {"BULL": 0.8, "CHOP": 0.4, "BEAR": 0.0}
     def_scale_map = {"BULL": 0.0, "CHOP": 0.4, "BEAR": 1.0}
@@ -662,7 +679,7 @@ def main() -> int:
     ap.add_argument("--btc-confirm-days", type=int, default=5)
     ap.add_argument("--eth-ema", type=_parse_ema_spans, default=(21, 55, 144))
     ap.add_argument("--btc-ema", type=_parse_ema_spans, default=(21, 55, 144))
-    ap.add_argument("--cost-bps", type=float, default=10.0)
+    ap.add_argument("--cost-bps", type=float, default=60.0)  # matches the validated production reference; was 10.0 (understated), briefly 20.0, now corrected to real Kraken taker fees at ~$1k-10k/month volume
     ap.add_argument("--cost-mode", choices=["entry_exit", "weight_change"], default="weight_change")
     ap.add_argument("--allocation-mode", choices=["fixed", "signal_weighted"], default="fixed")
     ap.add_argument("--gross-cap", type=float, default=0.8)
@@ -684,7 +701,7 @@ def main() -> int:
     ap.add_argument("--gold-symbol", default="PAXG-USD")
     ap.add_argument("--gold-ema", type=_parse_ema_spans, default=(21, 55, 144))
     ap.add_argument("--gold-cap", type=float, default=0.3)
-    ap.add_argument("--gold-cost-bps", type=float, default=10.0)
+    ap.add_argument("--gold-cost-bps", type=float, default=60.0)  # matches the validated production reference; was 10.0, briefly 20.0
     ap.add_argument("--regime-source", choices=["ema", "hmm"], default="ema")
     ap.add_argument("--hmm-regime-csv", default="")
     ap.add_argument("--eth-defensive-csv", default="artifacts/backtest/direction_event_model_v1_flat_defensive_6y_gapfilled.csv")
