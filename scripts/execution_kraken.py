@@ -272,6 +272,51 @@ def _require_live_confirmation(asset: str, action: str, asset_amount: float, eur
         raise KrakenExecutionError("Real order aborted by confirmation prompt")
 
 
+def _find_order_by_userref(userref: int) -> str | None:
+    """Look up whether an order tagged with this userref already exists (open or
+    closed) on Kraken. Used to avoid double-submitting AddOrder when a retry follows
+    a lost/timed-out response to a request Kraken may have already accepted."""
+    for method, key in (("OpenOrders", "open"), ("ClosedOrders", "closed")):
+        try:
+            resp = _private_query(method, {"userref": userref}, retries=1)
+        except Exception:
+            continue
+        orders = resp.get(key)
+        if isinstance(orders, dict) and orders:
+            return next(iter(orders.keys()))
+    return None
+
+
+def _place_order_idempotent(pair: str, action: str, volume: str, retries: int = 3) -> dict[str, Any]:
+    """AddOrder with a userref-based idempotency check. The generic _private_query retry
+    loop is safe to reuse for read-only calls (QueryOrders, balances, etc.), but blindly
+    retrying AddOrder on a lost/timed-out response risks submitting a SECOND real market
+    order if Kraken actually accepted the first one. Before each retry (and once more
+    after the final attempt), check whether an order tagged with this call's userref
+    already exists; only submit a fresh AddOrder if it doesn't."""
+    userref = int(time.time() * 1000) % 2_000_000_000
+    last_error: Exception | None = None
+    for attempt in range(1, retries + 1):
+        if attempt > 1:
+            existing = _find_order_by_userref(userref)
+            if existing:
+                return {"txid": [existing]}
+        try:
+            return _private_query(
+                "AddOrder",
+                {"pair": pair, "type": action, "ordertype": "market", "volume": volume, "userref": userref},
+                retries=1,
+            )
+        except Exception as exc:
+            last_error = exc
+            if attempt < retries:
+                time.sleep(5.0)
+    existing = _find_order_by_userref(userref)
+    if existing:
+        return {"txid": [existing]}
+    raise KrakenExecutionError(f"Kraken AddOrder failed: {last_error}")
+
+
 def place_market_order(
     asset: str,
     action: str,
@@ -305,15 +350,7 @@ def place_market_order(
     _require_live_confirmation(asset, action, float(asset_amount), eur_amount)
 
     pair = _resolve_pair(asset)
-    resp = _private_query(
-        "AddOrder",
-        {
-            "pair": pair,
-            "type": action,
-            "ordertype": "market",
-            "volume": f"{float(asset_amount):.10f}",
-        },
-    )
+    resp = _place_order_idempotent(pair, action, f"{float(asset_amount):.10f}")
     txid = resp.get("txid", [])
     order_id = txid[0] if isinstance(txid, list) and txid else str(txid)
     fill = confirm_order_filled(order_id)
@@ -376,7 +413,18 @@ def confirm_order_filled(order_id: str, timeout_seconds: int = 90) -> dict[str, 
     last_row: dict[str, Any] | None = None
     while time.time() < deadline:
         attempt += 1
-        result = _private_query("QueryOrders", {"txid": order_id})
+        try:
+            result = _private_query("QueryOrders", {"txid": order_id})
+        except Exception as exc:
+            # The order was already placed (we have a real order_id) -- if we can't even
+            # query its state, that's an unknown-state situation needing manual review,
+            # not a plain failure. Raising a bare exception here lost order_id entirely
+            # once it reached execute_strategy_signal's generic except block (logged as
+            # order_id=""), which broke reconciliation for exactly the orders that most
+            # need it -- ones that were placed but whose outcome couldn't be confirmed.
+            msg = f"UNKNOWN_ORDER_STATE: {order_id} -- QueryOrders itself failed: {exc}. Check Kraken manually before any further trading."
+            _send_discord(f"LIVE TRADE UNKNOWN STATE: {msg}")
+            raise KrakenOrderStateUnknown(order_id, msg) from exc
         row = _extract_order_row(result, order_id)
         if isinstance(row, dict):
             last_row = row
