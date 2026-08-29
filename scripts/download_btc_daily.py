@@ -73,6 +73,13 @@ def main() -> int:
     out_path = Path(args.out)
     rows = _read_existing(out_path)
     klines = _fetch_klines(symbol=str(args.symbol), limit=int(args.limit), timeout_sec=float(args.timeout_sec))
+    # Binance's klines endpoint returns the CURRENT, still-forming candle as the last
+    # element when queried without an explicit endTime -- close_time (index 6) is in
+    # the future for that candle. Treating it as a finalized daily close (as this did
+    # previously) means a mid-day run would size positions off a partial ~8h bar
+    # instead of the finalized close the backtest was always validated against.
+    now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
+    klines = [k for k in klines if len(k) > 6 and int(k[6]) <= now_ms]
     for k in klines:
         try:
             row = _row_from_kline(k)

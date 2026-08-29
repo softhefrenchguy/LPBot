@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -161,9 +162,18 @@ def _fetch_binance_daily_close(symbol: str, limit: int = 800, timeout_sec: float
         return pd.DataFrame(columns=["timestamp", "close"])
     if not isinstance(payload, list) or len(payload) == 0:
         return pd.DataFrame(columns=["timestamp", "close"])
+    # Binance's klines endpoint returns the CURRENT, still-forming candle as the last
+    # element when queried without an explicit endTime -- close_time (index 6) is in
+    # the future for that candle. Without filtering it out, a run any time other than
+    # exactly UTC midnight would treat a partial (as little as a few hours of) daily
+    # bar as a finalized close, which the backtests this system is validated against
+    # never saw -- EMAs/regime state would be computed off data the backtest didn't use.
+    now_ms = pd.Timestamp.now(tz="UTC").value // 1_000_000
     rows: list[dict[str, object]] = []
     for x in payload:
         try:
+            if len(x) > 6 and int(x[6]) > now_ms:
+                continue
             ts = pd.to_datetime(int(x[0]), unit="ms", utc=True)
             close = float(x[4])
         except Exception:
@@ -295,7 +305,7 @@ def _vol_filter_state(daily_close: pd.Series, cfg: dict[str, object]) -> dict[st
     lookback = max(2, _cfg_int(cfg, "vol_lookback", 20))
     rank_window = max(lookback + 5, _cfg_int(cfg, "vol_rank_window", 252))
     r = daily_close.astype(float).pct_change()
-    vol = r.rolling(lookback, min_periods=max(5, lookback // 2)).std(ddof=0) * np.sqrt(365.0)
+    vol = r.rolling(lookback, min_periods=max(5, lookback // 2)).std(ddof=0) * np.sqrt(252.0)  # was sqrt(365); matches backtest_eth_btc_portfolio.py's _eth_vol_frame annualization convention
     if len(vol.dropna()) == 0:
         return out
     latest_vol = float(vol.iloc[-1])
@@ -987,7 +997,7 @@ def _run() -> int:
     p.add_argument("--btc-ema-mid", type=int, default=55)
     p.add_argument("--btc-ema-slow", type=int, default=144)
     p.add_argument("--btc-confirm-days", type=int, default=5)
-    p.add_argument("--btc-exit-confirm-days", type=int, default=3)
+    p.add_argument("--btc-exit-confirm-days", type=int, default=5)  # was 3; validated backtest (backtest_eth_btc_portfolio.py) uses the same 5-day window for both entry and exit
     p.add_argument("--btc-min-hold-days", type=int, default=0)
     p.add_argument("--btc-target-vol", type=float, default=0.50)
     p.add_argument("--btc-vol-window", type=int, default=20)
@@ -1235,7 +1245,7 @@ def _run() -> int:
             off_exit_confirmed = bool(exit_confirmed_s.iloc[-1]) if len(exit_confirmed_s) else False
 
             daily_r = np.log(dc / dc.shift(1)).fillna(0.0)
-            rv = daily_r.rolling(int(args.off_vol_window), min_periods=max(5, int(args.off_vol_window) // 2)).std() * np.sqrt(365.0)
+            rv = daily_r.rolling(int(args.off_vol_window), min_periods=max(5, int(args.off_vol_window) // 2)).std() * np.sqrt(252.0)  # was sqrt(365); matches backtest annualization convention (return-type/ddof still differ from the backtest's vol_scalar -- not part of this fix, see README)
             vol_scalar_s = (float(args.off_target_vol) / (rv.replace(0.0, np.nan))).clip(
                 lower=float(args.off_vol_floor), upper=float(args.off_vol_cap)
             ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
@@ -1637,7 +1647,7 @@ def _run() -> int:
             btc_entry_threshold_met = bool(b_entry.iloc[-1]) if len(b_entry) else False
 
             b_r = np.log(btc_close_s / btc_close_s.shift(1)).fillna(0.0)
-            b_rv = b_r.rolling(int(args.btc_vol_window), min_periods=max(5, int(args.btc_vol_window) // 2)).std() * np.sqrt(365.0)
+            b_rv = b_r.rolling(int(args.btc_vol_window), min_periods=max(5, int(args.btc_vol_window) // 2)).std() * np.sqrt(252.0)  # was sqrt(365); matches backtest annualization convention (return-type/ddof still differ -- not part of this fix, see README)
             b_vs = (float(args.btc_target_vol) / (b_rv.replace(0.0, np.nan))).clip(
                 lower=float(args.btc_vol_floor), upper=float(args.btc_vol_cap)
             ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
@@ -1756,6 +1766,19 @@ def _run() -> int:
     if not np.isfinite(mean_reversion_weight):
         mean_reversion_weight = 0.0
     eth_execution_weight = float(min(gross_cap, max(0.0, (comb_w if np.isfinite(comb_w) else 0.0) + mean_reversion_weight)))
+
+    # Joint ETH+BTC gross-cap renormalization. Each sleeve above is independently
+    # clipped to gross_cap, but nothing previously capped their SUM -- the validated
+    # backtest (backtest_eth_btc_portfolio.py's signal_weighted allocation mode) always
+    # jointly caps alloc_eth+alloc_btc at gross_cap, so when both sleeves are active
+    # simultaneously here, live could carry up to ~2x the max exposure the backtest
+    # ever validated. Scale both down proportionally if their sum exceeds gross_cap.
+    combined_crypto_weight = eth_execution_weight + btc_comb_w
+    if combined_crypto_weight > gross_cap:
+        joint_scale = gross_cap / combined_crypto_weight
+        eth_execution_weight *= joint_scale
+        btc_comb_w *= joint_scale
+        flags.append("joint_gross_cap_bind")
 
     # 4) Live monitoring metrics
     rolling_30d_sharpe = np.nan
@@ -2680,8 +2703,40 @@ def _run() -> int:
         }
         ok, msg = _send_discord_summary(webhook, summary_payload, timeout_sec=float(args.discord_timeout_sec))
         print(msg if ok else f"WARNING: {msg}")
-    return 0
+    # STOP means a stop-loss condition fired -- the exit code must reflect that so any
+    # wrapper (cron script, orchestration) can actually detect and act on it. Previously
+    # this always returned 0 regardless of status, so a STOP was only visible if someone
+    # happened to read the Discord message or CSV.
+    return 1 if status == "STOP" else 0
+
+
+def _send_discord_raw(webhook_url: str, content: str, timeout_sec: float = 10.0) -> None:
+    if not webhook_url:
+        return
+    try:
+        payload = json.dumps({"content": content[:1900]}).encode("utf-8")
+        req = request.Request(webhook_url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+        with request.urlopen(req, timeout=timeout_sec):
+            pass
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
-    raise SystemExit(_run())
+    try:
+        raise SystemExit(_run())
+    except SystemExit:
+        raise
+    except BaseException as exc:
+        # _run() has no top-level try/except of its own, so any unhandled exception
+        # anywhere in it previously skipped the Discord send entirely (which happens
+        # near the very end of the function) -- a crash produced zero notification,
+        # silent until someone happened to check logs manually. This is the minimum
+        # fix: always get SOME signal out, even when we don't know what broke.
+        print(traceback.format_exc(), file=sys.stderr)
+        _send_discord_raw(
+            os.environ.get("DISCORD_WEBHOOK_URL", "").strip(),
+            f"\U0001f534 paper_trade_checklist.py CRASHED (unhandled {type(exc).__name__}): {exc}\n"
+            f"No daily summary was produced this run -- check logs immediately.",
+        )
+        raise SystemExit(1)
