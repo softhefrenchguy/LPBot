@@ -264,6 +264,12 @@ def main():
     spacing = pool.functions.tickSpacing().call()
     tick_base = (cur_tick // spacing) * spacing
     price_now = get_eth_price()
+    if not (price_now > 0):
+        # A zero/negative price (bad oracle read, broken slot0) silently zeroes out the
+        # WETH side of _usd_value() below, which would let the MAX_POSITION_USD cap be
+        # bypassed entirely (the whole point of the cap is to bound USD exposure -- it
+        # can't do that if the price feed it depends on is broken). Hard-stop instead.
+        raise RuntimeError(f"get_eth_price() returned a non-positive price ({price_now}); refusing to mint with a broken price feed.")
     print(f"🔢 Pool tick={cur_tick}, spacing={spacing}, tick_base={tick_base}")
 
     print(f"📍 Position mode: {POSITION_MODE}")

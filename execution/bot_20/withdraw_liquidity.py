@@ -225,6 +225,30 @@ def sqrt_price_x96_to_price_usdc_per_weth(sqrt_price_x96: int) -> float:
     return float((sqrt_price_x96 / (2 ** 96)) ** 2 * 1e12)
 
 
+def _liquidity_to_amounts(liquidity: int, tick_lower: int, tick_upper: int, sqrt_price_x96: int) -> tuple[int, int]:
+    """Standard Uniswap V3 liquidity->amounts math (mirrors periphery LiquidityAmounts.sol).
+    Used as a slippage-guard fallback when the on-chain decreaseLiquidity simulation call
+    itself fails (RPC hiccup, node lag, stale state) -- computes the same amounts the pool's
+    own math would give from liquidity + tick range + current spot price, so a failed
+    simulation degrades to "compute it ourselves" instead of silently submitting 0/0 minimums."""
+    q96 = 2 ** 96
+    sqrt_pa = int((1.0001 ** (tick_lower / 2.0)) * q96)
+    sqrt_pb = int((1.0001 ** (tick_upper / 2.0)) * q96)
+    if sqrt_pa > sqrt_pb:
+        sqrt_pa, sqrt_pb = sqrt_pb, sqrt_pa
+    if sqrt_price_x96 <= sqrt_pa:
+        amount0 = (liquidity * q96 * (sqrt_pb - sqrt_pa)) // (sqrt_pb * sqrt_pa)
+        amount1 = 0
+    elif sqrt_price_x96 >= sqrt_pb:
+        amount0 = 0
+        amount1 = (liquidity * (sqrt_pb - sqrt_pa)) // q96
+    else:
+        sqrt_p = sqrt_price_x96
+        amount0 = (liquidity * q96 * (sqrt_pb - sqrt_p)) // (sqrt_pb * sqrt_p)
+        amount1 = (liquidity * (sqrt_p - sqrt_pa)) // q96
+    return int(amount0), int(amount1)
+
+
 def get_price_and_wallet():
     slot0 = pool.functions.slot0().call()
     sqrtp = slot0[0]
@@ -647,6 +671,7 @@ def withdraw_if_possible():
             }
             # Simulate first (read-only static call, no tx sent) to get expected amounts,
             # then apply real slippage protection instead of accepting any amount.
+            skip_decrease = False
             try:
                 expected0, expected1 = pm.functions.decreaseLiquidity(decrease_params).call({"from": WALLET_ADDRESS})
                 min0 = int(expected0 * (1 - SLIPPAGE_BPS / 10000.0))
@@ -658,12 +683,34 @@ def withdraw_if_possible():
                     f"-> min0={min0}, min1={min1} ({SLIPPAGE_BPS:.0f}bps tolerance)"
                 )
             except Exception as sim_e:
-                print(f"⚠️ Could not simulate decreaseLiquidity for slippage guard ({sim_e}) — proceeding with amount0Min=amount1Min=0.")
+                # Simulation failed -- fall back to computing the expected amounts ourselves
+                # from liquidity + tick range + current spot price, rather than submitting
+                # with unprotected 0/0 minimums (which defeats the whole point of this guard).
+                try:
+                    tick_lower, tick_upper = int(pos[5]), int(pos[6])
+                    sqrt_price_x96 = pool.functions.slot0().call()[0]
+                    fb0, fb1 = _liquidity_to_amounts(liquidity, tick_lower, tick_upper, sqrt_price_x96)
+                    min0 = int(fb0 * (1 - SLIPPAGE_BPS / 10000.0))
+                    min1 = int(fb1 * (1 - SLIPPAGE_BPS / 10000.0))
+                    decrease_params["amount0Min"] = min0
+                    decrease_params["amount1Min"] = min1
+                    print(
+                        f"⚠️ Could not simulate decreaseLiquidity ({sim_e}) — computed fallback minimums from "
+                        f"liquidity+spot price instead: expected0~{fb0}, expected1~{fb1} -> min0={min0}, min1={min1}"
+                    )
+                except Exception as fallback_e:
+                    print(
+                        f"❌ Could not simulate decreaseLiquidity ({sim_e}) and fallback liquidity-math also failed "
+                        f"({fallback_e}) — refusing to withdraw with unprotected 0/0 minimums. Skipping decreaseLiquidity "
+                        f"this run; liquidity remains on-chain and will be retried next run."
+                    )
+                    skip_decrease = True
 
-            tx = pm.functions.decreaseLiquidity(decrease_params).build_transaction({"from": WALLET_ADDRESS})
-            r = sign_and_send(tx, gas_limit=350_000)
-            total_gas_eth += (r.gasUsed * r.effectiveGasPrice) / 1e18
-            print("💧 Liquidity withdrawn.")
+            if not skip_decrease:
+                tx = pm.functions.decreaseLiquidity(decrease_params).build_transaction({"from": WALLET_ADDRESS})
+                r = sign_and_send(tx, gas_limit=350_000)
+                total_gas_eth += (r.gasUsed * r.effectiveGasPrice) / 1e18
+                print("💧 Liquidity withdrawn.")
         except Exception as e:
             print(f"❌ decreaseLiquidity failed: {e}")
     else:
