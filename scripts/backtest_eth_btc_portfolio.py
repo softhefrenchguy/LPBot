@@ -211,6 +211,33 @@ def _load_external_regime(path: Path) -> pd.DataFrame:
     return d[["day", "regime_override"]].copy()
 
 
+def _apply_resize_deadband(alloc: pd.Series, active: pd.Series, threshold: float) -> pd.Series:
+    """Only update the EXECUTED allocation when the target moves more than `threshold`
+    (absolute, e.g. 0.05 = 5 percentage points of gross_cap) away from the last executed
+    value -- unless the sleeve is entering (active flips 0->1) or exiting (active flips
+    1->0) that day, which always execute the new value immediately regardless of size.
+    This throttles the continuous vol-filter/asymmetric-sizing-driven resizing that drives
+    most of alloc_turnover_cost while a position is held, without delaying real entry/exit
+    decisions. threshold=0.0 disables the deadband entirely (every target executes as-is,
+    identical to no deadband)."""
+    if threshold <= 0.0:
+        return alloc.copy()
+    alloc_vals = alloc.reset_index(drop=True).to_numpy(dtype=float)
+    active_vals = active.reset_index(drop=True).to_numpy(dtype=float)
+    out = np.zeros(len(alloc_vals))
+    executed = 0.0
+    prev_active = 0
+    for i in range(len(alloc_vals)):
+        target = alloc_vals[i]
+        cur_active = int(active_vals[i] > 0)
+        entering_or_exiting = cur_active != prev_active
+        if entering_or_exiting or abs(target - executed) > threshold:
+            executed = target
+        out[i] = executed
+        prev_active = cur_active
+    return pd.Series(out, index=alloc.index)
+
+
 def _eth_vol_frame(eth_daily: pd.DataFrame) -> pd.DataFrame:
     v = eth_daily[["day", "close"]].copy()
     ret = v["close"].pct_change()
@@ -513,6 +540,8 @@ def run_sleeve(
     cross_confirm_variant: str = "off",
     regime_override: pd.DataFrame | None = None,
     price_data: pd.DataFrame | None = None,
+    reversal_cooldown_days: int = 0,
+    reversal_cooldown_threshold_days: int = 10,
 ) -> pd.DataFrame:
     d = price_data.copy() if price_data is not None else _download_binance_daily(symbol=symbol, start=start, end=end)
     if d.empty:
@@ -565,8 +594,10 @@ def run_sleeve(
     entry_i: int | None = None
     entry_open = np.nan
     cur_trade_id = 0
+    cooldown_until_i = -1
+    reversal_cooldown_blocks = 0
     for i in range(len(d)):
-        if active == 0 and bool(entry.iloc[i]):
+        if active == 0 and bool(entry.iloc[i]) and i > cooldown_until_i:
             active = 1
             entry_i = i
             cur_trade_id += 1
@@ -585,8 +616,12 @@ def run_sleeve(
                         transition_mult[i] = 0.6
                     else:
                         transition_class[i] = "MID"
+        elif active == 0 and bool(entry.iloc[i]) and i <= cooldown_until_i:
+            reversal_cooldown_blocks += 1
         elif active == 1 and bool(exit_.iloc[i]):
             active = 0
+            if reversal_cooldown_days > 0 and entry_i is not None and (i - entry_i) < int(reversal_cooldown_threshold_days):
+                cooldown_until_i = i + int(reversal_cooldown_days) - 1
             entry_i = None
         elif active == 1 and stop_loss and entry_i is not None and np.isfinite(entry_open) and entry_open > 0:
             trade_ret = float(d["close"].iloc[i] / entry_open - 1.0)
@@ -596,6 +631,8 @@ def run_sleeve(
                 future = d["close"].iloc[i + 1 : i + 11]
                 if len(future) and bool((future > entry_open).any()):
                     stop_loss_whipsaw[i] = 1
+                if reversal_cooldown_days > 0 and entry_i is not None and (i - entry_i) < int(reversal_cooldown_threshold_days):
+                    cooldown_until_i = i + int(reversal_cooldown_days) - 1
                 entry_i = None
         if active == 1 and transition_momentum and entry_i is not None:
             transition_class[i] = transition_class[entry_i]
@@ -609,6 +646,7 @@ def run_sleeve(
     d["trade_id"] = trade_id
     d["stop_loss_exit"] = stop_loss_exit
     d["stop_loss_whipsaw"] = stop_loss_whipsaw
+    d["reversal_cooldown_blocks"] = reversal_cooldown_blocks
     d["transition_class"] = transition_class
     d["transition_multiplier"] = transition_mult
     d["off_raw_signal"] = np.where(d["off_active"] == 1, d["vol_scalar"], 0.0)
@@ -688,6 +726,9 @@ def main() -> int:
     ap.add_argument("--macro-filter", action="store_true")
     ap.add_argument("--stop-loss", action="store_true")
     ap.add_argument("--stop-loss-pct", type=float, default=0.08)
+    ap.add_argument("--reversal-cooldown-days", type=int, default=0, help="After a trade exits having been held less than --reversal-cooldown-threshold-days, block re-entry on that sleeve for this many days. 0 (default) disables the cooldown entirely.")
+    ap.add_argument("--reversal-cooldown-threshold-days", type=int, default=10, help="A trade held fewer than this many days is classified as a quick reversal and triggers the cooldown on exit.")
+    ap.add_argument("--resize-deadband", type=float, default=0.0, help="Only update the executed alloc_eth/alloc_btc when the target moves more than this much (absolute, e.g. 0.05 = 5pp of gross_cap) from the last executed value; real entries/exits always execute immediately regardless. 0.0 (default) disables the deadband entirely.")
     ap.add_argument("--vol-filter", action="store_true")
     ap.add_argument("--transition-momentum", action="store_true")
     ap.add_argument("--cross-confirm", choices=["off", "strict", "loose", "one-way"], default="off")
@@ -748,6 +789,8 @@ def main() -> int:
         cross_confirm_variant=str(args.cross_confirm),
         regime_override=regime_override,
         price_data=eth_price_data,
+        reversal_cooldown_days=int(args.reversal_cooldown_days),
+        reversal_cooldown_threshold_days=int(args.reversal_cooldown_threshold_days),
     )
     btc = run_sleeve(
         symbol=args.btc_symbol,
@@ -767,6 +810,8 @@ def main() -> int:
         cross_confirm_variant=str(args.cross_confirm),
         regime_override=regime_override,
         price_data=btc_price_data,
+        reversal_cooldown_days=int(args.reversal_cooldown_days),
+        reversal_cooldown_threshold_days=int(args.reversal_cooldown_threshold_days),
     )
 
     keep = [
@@ -792,6 +837,7 @@ def main() -> int:
         "conviction",
         "cross_trades_removed",
         "cross_trades_delayed",
+        "reversal_cooldown_blocks",
     ]
     e = eth[keep].copy().rename(
         columns={
@@ -815,6 +861,7 @@ def main() -> int:
             "conviction": "eth_conviction",
             "cross_trades_removed": "eth_cross_trades_removed",
             "cross_trades_delayed": "eth_cross_trades_delayed",
+            "reversal_cooldown_blocks": "eth_reversal_cooldown_blocks",
         }
     )
     b = btc[keep].copy().rename(
@@ -839,6 +886,7 @@ def main() -> int:
             "conviction": "btc_conviction",
             "cross_trades_removed": "btc_cross_trades_removed",
             "cross_trades_delayed": "btc_cross_trades_delayed",
+            "reversal_cooldown_blocks": "btc_reversal_cooldown_blocks",
         }
     )
 
@@ -939,6 +987,26 @@ def main() -> int:
         merged.loc[active_any, "alloc_eth"] = merged.loc[active_any, "alloc_eth"] * merged.loc[active_any, "dd_multiplier"]
         merged.loc[active_any, "alloc_btc"] = merged.loc[active_any, "alloc_btc"] * merged.loc[active_any, "dd_multiplier"]
 
+    if float(args.resize_deadband) > 0.0:
+        merged["alloc_eth"] = _apply_resize_deadband(merged["alloc_eth"], merged["eth_off_active"], float(args.resize_deadband))
+        merged["alloc_btc"] = _apply_resize_deadband(merged["alloc_btc"], merged["btc_off_active"], float(args.resize_deadband))
+
+    # Alloc-level turnover cost: vol_multiplier/asym_*_multiplier/macro_multiplier/dd_multiplier
+    # all continuously resize alloc_eth/alloc_btc day to day (independent of whether the
+    # underlying sleeve signal itself is changing), but until now nothing charged a transaction
+    # cost for that resizing -- only the sleeve-level weight_exec turnover (pre-normalization,
+    # baked into eth_strategy_return/btc_strategy_return) was costed, and that gets scaled down
+    # by alloc_eth/alloc_btc when combined into the portfolio return, making it a small
+    # second-order effect rather than a real proxy for the cost of actually moving portfolio
+    # capital between sleeves. Quantified in check_baseline_rebalance_cost.py as ~40-51% of
+    # 2022/2023's total cost; fixed at the source here using the same _alloc_turnover formula
+    # already established (backtest_mode_a_validation.py) rather than as a post-hoc adjustment.
+    merged["alloc_turnover"] = (
+        (merged["alloc_eth"] - merged["alloc_eth"].shift(1).fillna(0.0)).abs()
+        + (merged["alloc_btc"] - merged["alloc_btc"].shift(1).fillna(0.0)).abs()
+    )
+    merged["alloc_turnover_cost"] = merged["alloc_turnover"] * (float(args.cost_bps) / 10000.0)
+
     merged["eth_timing_improvement"] = 0.0
     merged["eth_timing_benefit"] = 0.0
     if bool(args.intraday_timing):
@@ -1005,6 +1073,7 @@ def main() -> int:
         merged["alloc_eth"] * merged["eth_strategy_return"]
         + merged["alloc_btc"] * merged["btc_strategy_return"]
         + merged["gold_strategy_return"]
+        - merged["alloc_turnover_cost"]
     )
     merged["combined_spot_return"] = 0.5 * merged["eth_spot_return"] + 0.5 * merged["btc_spot_return"]
     merged["combined_eq"] = (1.0 + merged["combined_return"]).cumprod()
