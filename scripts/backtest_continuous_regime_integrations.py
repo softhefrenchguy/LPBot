@@ -12,13 +12,13 @@ from backtest_forex_optimised import _stats
 from backtest_overlay_strategies import _mean_reversion_overlay
 
 
-PRODUCTION_REFERENCE_SHARPE = 1.510  # corrected for real Kraken cost @ ~$1k-10k/month volume, 60bps/leg (was 1.649 @ 20bps/leg, 1.762 pre-gap-fix)
+PRODUCTION_REFERENCE_SHARPE = 1.121  # corrected: alloc_eth/alloc_btc turnover cost (vol-filter/asymmetric-sizing driven resizing) now charged at the source in backtest_eth_btc_portfolio.py, not a post-hoc adjustment (was 1.510 pre-fix, 1.649 @ 20bps/leg, 1.762 pre-gap-fix)
 STATES = ["risk_on", "weakening", "risk_off", "panic"]
 
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Research harness for continuous_regime_score integration modes A-D. Reads the real production daily file and reconstructs returns via alloc_eth/alloc_btc (not raw sleeve weight_exec).")
-    p.add_argument("--work-dir", default="artifacts/backtest/forex_optimised", help="Dir holding the real validated_crypto_daily.csv (the actual 1.510-Sharpe production run).")
+    p.add_argument("--work-dir", default="artifacts/backtest/forex_optimised", help="Dir holding the real validated_crypto_daily.csv (the actual 1.121-Sharpe production run).")
     p.add_argument("--regime-score", default="artifacts/backtest/continuous_regime_score_daily.csv")
     p.add_argument("--classifier-daily", default="artifacts/bear_classifier/bear_classifier_rotation_daily.csv")
     p.add_argument("--start", default="2019-01-01")
@@ -34,7 +34,7 @@ def _parse_args() -> argparse.Namespace:
 
 def _load_base(work_dir: Path, start: str, end: str) -> pd.DataFrame:
     """The REAL production daily file (via _crypto_main), not extended_overlay_daily.csv
-    (verified stale -- its own combined_return gives ~1.50 Sharpe, not 1.510, for any
+    (verified stale -- its own combined_return gives ~1.50 Sharpe, not 1.121, for any
     column in it, regardless of reconstruction method)."""
     base = pd.read_csv(work_dir / "validated_crypto_daily.csv", low_memory=False)
     base["day"] = pd.to_datetime(base["day"], utc=True, errors="coerce").dt.floor("D")
@@ -65,11 +65,22 @@ def _load_states(path: Path, base: pd.DataFrame) -> pd.DataFrame:
 def _main_return(x: pd.DataFrame, gross_cap: float, cost_bps: float) -> pd.Series:
     """alloc_eth/alloc_btc are the REAL portfolio-normalized executed weights (verified:
     alloc_eth*eth_strategy_return + alloc_btc*btc_strategy_return + gold_strategy_return
-    reproduces the file's own combined_return to 1e-16). eth_weight_exec/btc_weight_exec
-    are the pre-normalization sleeve-level signals and are NOT what determines executed
-    P&L -- using them was the bug in the first version of this harness."""
+    - alloc_turnover_cost reproduces the file's own combined_return to 1e-16 when alloc_eth/
+    alloc_btc are unmodified). eth_weight_exec/btc_weight_exec are the pre-normalization
+    sleeve-level signals and are NOT what determines executed P&L -- using them was the bug
+    in the first version of this harness.
+
+    alloc_turnover_cost is recomputed here from x's CURRENT alloc_eth/alloc_btc rather than
+    read from a stored column, because this function is also called on modified alloc series
+    (Mode A's state-conviction adjustment, LP capital-sharing variants, etc.) where a stored
+    baseline-alloc turnover cost would be stale."""
     x = x.copy()
-    x["combined_return"] = x["alloc_eth"] * x["eth_strategy_return"] + x["alloc_btc"] * x["btc_strategy_return"] + x["gold_strategy_return"]
+    alloc_turnover = (
+        (x["alloc_eth"] - x["alloc_eth"].shift(1).fillna(0.0)).abs()
+        + (x["alloc_btc"] - x["alloc_btc"].shift(1).fillna(0.0)).abs()
+    )
+    alloc_turnover_cost = alloc_turnover * (float(cost_bps) / 10000.0)
+    x["combined_return"] = x["alloc_eth"] * x["eth_strategy_return"] + x["alloc_btc"] * x["btc_strategy_return"] + x["gold_strategy_return"] - alloc_turnover_cost
     mr = _mean_reversion_overlay(x, gross_cap=gross_cap, cost_bps=cost_bps, z_entry=-1.5, z_exit=-0.5, ret_entry=-0.03, max_hold_days=10)
     return x["combined_return"] + pd.to_numeric(mr["mr_return"], errors="coerce").fillna(0.0)
 
@@ -268,7 +279,7 @@ def _mode_c(d: pd.DataFrame, base_main_return: pd.Series, baseline_stats: dict, 
         print(f"  [C diagnosis] Severe-subset hedge Sharpe: {fix['sharpe']:.3f} -> {verdict}")
 
     # Existing classifier benchmark: reported on ITS OWN file's baseline (that file is
-    # also not on the 1.510 reference -- flagged separately, not blended into the table above).
+    # also not on the 1.121 reference -- flagged separately, not blended into the table above).
     cls_path = Path(args.classifier_daily)
     if cls_path.exists():
         raw = pd.read_csv(cls_path, low_memory=False)
@@ -277,10 +288,10 @@ def _mode_c(d: pd.DataFrame, base_main_return: pd.Series, baseline_stats: dict, 
         if "classifier_return" in raw.columns and "baseline_current_return" in raw.columns:
             cls_stats = _stats(pd.to_numeric(raw["classifier_return"], errors="coerce").fillna(0.0))
             cls_base_stats = _stats(pd.to_numeric(raw["baseline_current_return"], errors="coerce").fillna(0.0))
-            print(f"  [C benchmark] Existing panic/inflation classifier (own file, NOT the 1.510 reference): "
+            print(f"  [C benchmark] Existing panic/inflation classifier (own file, NOT the 1.121 reference): "
                   f"its own baseline Sharpe {cls_base_stats['sharpe']:.3f} -> with classifier Sharpe {cls_stats['sharpe']:.3f} "
                   f"({cls_stats['sharpe']-cls_base_stats['sharpe']:+.3f}). Reported separately, not blended into the table above "
-                  f"since it's measured on a different (also non-1.510) baseline file.")
+                  f"since it's measured on a different (also non-1.121) baseline file.")
 
 
 def main() -> int:

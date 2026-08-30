@@ -12,9 +12,9 @@ from backtest_continuous_regime_integrations import _apply_state_conviction, _lo
 from backtest_forex_optimised import _stats
 
 
-PRODUCTION_REFERENCE_SHARPE = 1.510  # corrected for real Kraken cost @ ~$1k-10k/month volume, 60bps/leg (was 1.649 @ 20bps/leg, 1.762 pre-gap-fix)
-PRODUCTION_WALKFORWARD_OOS = {2021: 1.996, 2022: -0.496, 2023: 0.163, 2024: 2.087}  # corrected for 60bps cost (was {2021: 2.080, 2022: -0.146, 2023: 0.377, 2024: 2.265} @ 20bps)
-PRODUCTION_WALKFORWARD_AVG = 0.938  # corrected for 60bps cost (was 1.144 @ 20bps, 1.086 pre-lookahead-bias-fix, 1.109 pre-gap-fix)
+PRODUCTION_REFERENCE_SHARPE = 1.121  # corrected: alloc-turnover cost (vol-filter/asymmetric-sizing driven resizing) now charged at the source, not a post-hoc adjustment (was 1.510 pre-fix, 1.649 @ 20bps/leg, 1.762 pre-gap-fix)
+PRODUCTION_WALKFORWARD_OOS = {2021: 1.610, 2022: -0.704, 2023: -0.480, 2024: 1.536}  # corrected for alloc-turnover-cost-at-source fix (was {2021: 1.996, 2022: -0.496, 2023: 0.163, 2024: 2.087} pre-fix)
+PRODUCTION_WALKFORWARD_AVG = 0.490  # corrected for alloc-turnover-cost-at-source fix (was 0.938 pre-fix, 1.144 @ 20bps, 1.086 pre-lookahead-bias-fix, 1.109 pre-gap-fix)
 
 NO_PANIC_SHRINK = {"risk_on": 1.0, "weakening": 0.85, "risk_off": 0.70, "panic": 1.0}
 SHRINK_PANIC = {"risk_on": 1.0, "weakening": 0.85, "risk_off": 0.70, "panic": 0.50}
@@ -230,23 +230,21 @@ def _step3_volfilter_check(args: argparse.Namespace, d: pd.DataFrame, withvol_mo
 
 
 # ---------------------------------------------------------------------------
-# Step 4: incremental rebalancing cost check.
+# Step 4: rebalancing cost context (formerly "incremental rebalancing cost check").
 #
 # combined_return = alloc_eth*eth_strategy_return + alloc_btc*btc_strategy_return
-# + gold_strategy_return. eth_strategy_return/btc_strategy_return already have a
-# cost subtracted, but that cost is computed from weight_exec's OWN turnover (the
-# sleeve-level signal, pre-portfolio-normalization) -- see backtest_eth_btc_portfolio.py
-# run_sleeve(): cost = |weight_exec[t]-weight_exec[t-1]| * cost_bps/10000. The
-# alloc_eth/alloc_btc multiplication happens AFTER that cost is already subtracted,
-# and no cost is ever charged anywhere for alloc_eth/alloc_btc's OWN day-to-day
-# turnover. That's true of the baseline too (pre-existing, out of scope to retroactively
-# change -- it's what the accepted 1.510 reference already reflects), but it means
-# Mode A's state multiplier -- which changes alloc_eth/alloc_btc every time `state`
-# transitions between the 4 buckets -- is riding along cost-free. This isolates and
-# charges specifically the INCREMENTAL turnover Mode A adds on top of what the
-# baseline's own alloc_eth/alloc_btc turnover already is (from vol-filter/asym-sizing/
-# signal-split dynamics), so the baseline's own (already-accepted) cost treatment is
-# left untouched and only Mode A's new churn gets priced.
+# + gold_strategy_return - alloc_turnover_cost. eth_strategy_return/btc_strategy_return
+# have their own sleeve-level cost (from weight_exec's OWN turnover, pre-portfolio-
+# normalization -- see backtest_eth_btc_portfolio.py run_sleeve()). alloc_turnover_cost
+# is a SEPARATE cost on alloc_eth/alloc_btc's own day-to-day change, now charged at the
+# source (backtest_eth_btc_portfolio.py's main(), and recomputed fresh by _main_return
+# for any alloc series passed to it -- including Mode A's). This used to be an
+# unpriced gap that this script isolated and charged as an "incremental" adjustment on
+# top of an otherwise-uncosted baseline; now that the baseline itself prices its own
+# alloc-turnover at the source, modeA_ret below already reflects Mode A's FULL
+# alloc-turnover cost (not just the incremental slice beyond baseline). This step now
+# reports the incremental turnover Mode A introduces vs. baseline purely for context
+# (how much extra churn is Mode A responsible for), without a second cost subtraction.
 # ---------------------------------------------------------------------------
 
 def _alloc_turnover(alloc_eth: pd.Series, alloc_btc: pd.Series) -> pd.Series:
@@ -254,6 +252,12 @@ def _alloc_turnover(alloc_eth: pd.Series, alloc_btc: pd.Series) -> pd.Series:
 
 
 def _step4_rebalancing_cost(d: pd.DataFrame, gross_cap: float, cost_bps: float) -> pd.DataFrame:
+    """Alloc-turnover cost is now charged at the source (backtest_eth_btc_portfolio.py) and
+    _main_return recomputes+charges it fresh for whatever alloc series it's given -- so
+    modeA_ret below ALREADY reflects Mode A's own full alloc-turnover cost, not just a
+    "baseline vs incremental" delta. This step now reports the incremental turnover Mode A
+    introduces (for context on how much extra churn it is) without re-subtracting a second
+    cost layer on top of what _main_return already charges."""
     modeA_d = _apply_state_conviction(d, SHRINK_PANIC, gross_cap)
 
     baseline_turnover = _alloc_turnover(d["alloc_eth"], d["alloc_btc"])
@@ -272,29 +276,25 @@ def _step4_rebalancing_cost(d: pd.DataFrame, gross_cap: float, cost_bps: float) 
     print(f"Average incremental (alloc actually changed beyond baseline) rebalance days/year: {per_year['incremental_rebalance_days'].mean():.1f}")
     print()
 
-    modeA_ret_uncosted = _main_return(modeA_d, gross_cap, cost_bps)
-    additional_cost = incremental_turnover * (cost_bps / 10000.0)
-    modeA_ret_costed = modeA_ret_uncosted - additional_cost.values
+    # modeA_ret already has Mode A's full alloc-turnover cost baked in via _main_return.
+    modeA_ret = _main_return(modeA_d, gross_cap, cost_bps)
+    incremental_cost_for_context = incremental_turnover * (cost_bps / 10000.0)
+    stats_modeA = _stats(modeA_ret)
+    total_incremental_cost_pct = float(incremental_cost_for_context.sum() * 100)
 
-    stats_uncosted = _stats(modeA_ret_uncosted)
-    stats_costed = _stats(modeA_ret_costed)
-    total_additional_cost_pct = float(additional_cost.sum() * 100)
-
-    print(f"Total incremental turnover charged (sum of |alloc change| beyond baseline, 2019-2024): {float(incremental_turnover.sum()):.2f}")
-    print(f"Total additional cost from Mode A's own rebalancing @ {cost_bps:.0f}bps: {total_additional_cost_pct:.3f}% cumulative drag over the period")
+    print(f"Total incremental turnover vs baseline (sum of |alloc change| beyond baseline, 2019-2024): {float(incremental_turnover.sum()):.2f}")
+    print(f"Of which incremental cost (context only, already included in Mode A's Sharpe below) @ {cost_bps:.0f}bps: {total_incremental_cost_pct:.3f}% cumulative drag over the period")
     print()
     print(f"{'':45} {'Sharpe':>8} {'CAGR':>8} {'MaxDD':>8}")
-    print(f"{'Mode A, WITHOUT incremental rebalance cost':45} {stats_uncosted['sharpe']:>8.3f} {stats_uncosted['cagr']*100:>7.1f}% {stats_uncosted['maxdd']*100:>7.1f}%")
-    print(f"{'Mode A, WITH incremental rebalance cost':45} {stats_costed['sharpe']:>8.3f} {stats_costed['cagr']*100:>7.1f}% {stats_costed['maxdd']*100:>7.1f}%")
-    print(f"{'Production baseline (unchanged reference)':45} {PRODUCTION_REFERENCE_SHARPE:>8.3f}")
+    print(f"{'Mode A, fully costed (incl. its own alloc-turnover)':45} {stats_modeA['sharpe']:>8.3f} {stats_modeA['cagr']*100:>7.1f}% {stats_modeA['maxdd']*100:>7.1f}%")
+    print(f"{'Production baseline (also fully costed)':45} {PRODUCTION_REFERENCE_SHARPE:>8.3f}")
     print()
-    still_positive = stats_costed["sharpe"] > PRODUCTION_REFERENCE_SHARPE
-    print(f"Verdict: Mode A {'STILL BEATS' if still_positive else 'NO LONGER BEATS'} the production baseline once its own incremental rebalancing is fully costed "
-          f"({stats_costed['sharpe']:.3f} vs {PRODUCTION_REFERENCE_SHARPE:.3f}).")
+    still_positive = stats_modeA["sharpe"] > PRODUCTION_REFERENCE_SHARPE
+    print(f"Verdict: Mode A {'STILL BEATS' if still_positive else 'NO LONGER BEATS'} the production baseline once its own rebalancing is fully costed "
+          f"({stats_modeA['sharpe']:.3f} vs {PRODUCTION_REFERENCE_SHARPE:.3f}).")
 
     return pd.DataFrame([
-        {"config": "mode_a_uncosted_rebalance", "sharpe": stats_uncosted["sharpe"], "cagr": stats_uncosted["cagr"], "maxdd": stats_uncosted["maxdd"]},
-        {"config": "mode_a_with_incremental_rebalance_cost", "sharpe": stats_costed["sharpe"], "cagr": stats_costed["cagr"], "maxdd": stats_costed["maxdd"], "total_additional_cost_pct": total_additional_cost_pct},
+        {"config": "mode_a_fully_costed", "sharpe": stats_modeA["sharpe"], "cagr": stats_modeA["cagr"], "maxdd": stats_modeA["maxdd"], "total_incremental_cost_pct_context_only": total_incremental_cost_pct},
         {"config": "production_baseline_reference", "sharpe": PRODUCTION_REFERENCE_SHARPE},
     ])
 

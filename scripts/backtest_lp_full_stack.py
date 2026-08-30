@@ -13,8 +13,8 @@ from backtest_overlay_strategies import _mean_reversion_overlay  # noqa: E402
 from backtest_forex_optimised import _stats  # noqa: E402
 
 
-PRODUCTION_REFERENCE_SHARPE_UNCOSTED = 1.510  # corrected for 60bps real Kraken cost (was 1.649 @ 20bps, 1.762 pre-gap-fix)
-PRODUCTION_REFERENCE_SHARPE_COSTED = 1.121  # corrected for 60bps real Kraken cost (was 1.521 @ 20bps, 1.633 pre-gap-fix)
+PRODUCTION_REFERENCE_SHARPE_UNCOSTED = 1.510  # PRE-fix reference: before alloc_turnover_cost was charged at the source (backtest_eth_btc_portfolio.py). Kept only as a before/after comparison point.
+PRODUCTION_REFERENCE_SHARPE_COSTED = 1.121  # CURRENT reference: alloc-turnover cost now charged at the source, not a post-hoc adjustment -- this is what baseline_ret (computed fresh below via _main_return) should already equal.
 
 UNISWAP_V3_LAUNCH = pd.Timestamp("2021-05-05", tz="UTC")
 REAL_FEE_DATA_START = pd.Timestamp("2024-04-01", tz="UTC")  # subgraph volumeUSD coverage begins here (verified this session)
@@ -127,7 +127,7 @@ def main() -> int:
     print("LP FULL-STACK INTEGRATION -- baseline vs baseline+LP, same corrected 2019-2024 data")
     print("=" * 115)
     print(f"Baseline (this run, corrected data): Sharpe={baseline_stats['sharpe']:.3f}  CAGR={baseline_stats['cagr']*100:.1f}%  MaxDD={baseline_stats['maxdd']*100:.1f}%")
-    print(f"Production reference (accepted): uncosted={PRODUCTION_REFERENCE_SHARPE_UNCOSTED:.3f}  fully-costed={PRODUCTION_REFERENCE_SHARPE_COSTED:.3f}")
+    print(f"Production reference: pre-alloc-turnover-cost-fix={PRODUCTION_REFERENCE_SHARPE_UNCOSTED:.3f}  current (fixed at source)={PRODUCTION_REFERENCE_SHARPE_COSTED:.3f}")
     print()
 
     # --- Capacity accounting: respect the mean-reversion (CHOP) overlay's own claim on idle capital ---

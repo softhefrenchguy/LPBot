@@ -25,7 +25,13 @@ def main() -> int:
     d["eth_close"] = pd.to_numeric(d["eth_close"], errors="coerce")
     d["rolling_vol_20d"] = pd.to_numeric(d["rolling_vol_20d"], errors="coerce")
 
-    combined_no_overlay = d["alloc_eth"] * d["eth_strategy_return"] + d["alloc_btc"] * d["btc_strategy_return"] + d["gold_strategy_return"]
+    # Alloc-turnover cost is charged at the source in backtest_eth_btc_portfolio.py now, but
+    # this reconstructs combined_return from raw components rather than reading the CSV's own
+    # combined_return column (needed since this script drops in an LP/CHOP overlay on top) --
+    # so it must also recompute+charge alloc_turnover_cost itself, matching _main_return.
+    alloc_turnover = (d["alloc_eth"] - d["alloc_eth"].shift(1).fillna(0.0)).abs() + (d["alloc_btc"] - d["alloc_btc"].shift(1).fillna(0.0)).abs()
+    alloc_turnover_cost = alloc_turnover * (COST_BPS / 10000.0)
+    combined_no_overlay = d["alloc_eth"] * d["eth_strategy_return"] + d["alloc_btc"] * d["btc_strategy_return"] + d["gold_strategy_return"] - alloc_turnover_cost
 
     mr = _mean_reversion_overlay(d, gross_cap=GROSS_CAP, cost_bps=COST_BPS, z_entry=-1.5, z_exit=-0.5, ret_entry=-0.03, max_hold_days=10)
     mr_weight_exec = pd.to_numeric(mr["mr_weight_exec"], errors="coerce").fillna(0.0)

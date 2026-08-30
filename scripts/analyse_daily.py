@@ -253,7 +253,7 @@ Strategy context:
 - Mean-reversion overlay in CHOP regime
 - Vol filter: HIGH=0.5x, LOW=1.2x
 - PAXG gold reserve in BEAR regime
-- Validated Sharpe 1.510, CAGR 34.21%
+- Validated Sharpe 1.121, CAGR 25.59%
 - Paper trading since 2026-03-21
 - One completed trade: -10.21% (Apr-May 2026)
 - Currently waiting for next entry signal
