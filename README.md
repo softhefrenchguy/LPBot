@@ -76,7 +76,7 @@ Frontend source lives in `dashboard/`.
 | Gold/PAXG sleeve | Paper tracked | BEAR + flat ETH + PAXG EMA alignment gate. |
 | Market tracker | Live info | BTC, oil, gas, metals, equities, bonds, dollar, wheat. |
 | News watcher | Live info | 12-hour RSS filter plus Claude macro-event classifier. |
-| Mode A (state-based sizing) | Researched, **not recommended** | Scales `alloc_eth`/`alloc_btc` by regime conviction. An earlier pass claimed +0.246 Sharpe OOS; after the lookahead-bias fix and the real-cost correction, the true edge is +0.050 uncosted and Mode A doesn't beat baseline even before its own extra rebalancing cost is added (1.509 vs 1.510). See [Research Log](#research-log-data-correction--lp-overlay-investigation) below. |
+| Mode A (state-based sizing) | Researched, **not recommended** | Scales `alloc_eth`/`alloc_btc` by regime conviction. An earlier pass claimed +0.246 Sharpe OOS; after the lookahead-bias fix, the real-cost correction, and the alloc-turnover-cost-at-source fix, Mode A's full-period Sharpe (1.093) is simply below baseline's (1.121) — no further adjustment needed to show it loses. See [Research Log](#research-log-data-correction--lp-overlay-investigation) below. |
 | LP overlay (Uniswap V3) | Researched, execution code built, **on hold** | Full-stack portfolio integration came back negligible-to-negative (+0.001 Sharpe standalone, -0.008 once sharing idle capital with the CHOP overlay). Not deployed. See [Research Log](#research-log-data-correction--lp-overlay-investigation) and [`execution/README.md`](execution/README.md). |
 
 ## Repository Layout
@@ -233,9 +233,60 @@ This has a real, material impact — noticeably larger than either prior correct
 Per-year walk-forward OOS at the corrected cost: 2021 Sharpe 1.996 (CAGR 60.6%), 2022 Sharpe -0.496
 (CAGR 1.0%), 2023 Sharpe 0.163 (CAGR 6.4%), 2024 Sharpe 2.087 (CAGR 49.5%) — still robust (3/4
 positive years) but visibly worse than the 20bps figures, especially 2022 and 2023, the two years
-with the most rebalancing activity relative to their return. This is the number that should be used
-for any forward-looking expectation now, not the 20bps-based ones above — those remain in this log
-only as a record of what was corrected, not as current reference figures.
+with the most rebalancing activity relative to their return. **This "1.510 uncosted / 1.121
+fully-costed" split was itself only a post-hoc adjustment layer at this point — see 1d, which fixes
+it at the source and makes 1.121 the actual reference, not an adjustment on top of 1.510.**
+
+### 1d. Alloc-turnover-cost fix at the source (fourth correction layer)
+
+A diagnostic thread investigating what actually drives 2022/2023's cost (see section 5's audit, and
+the reversal-cooldown investigation below) traced the "fully turnover-costed" 1.121 figure from 1c
+back to its origin: `check_baseline_rebalance_cost.py` was computing it as a **post-hoc adjustment**
+— `alloc_eth`/`alloc_btc`'s own day-to-day resizing (driven by the vol-filter and asymmetric-sizing
+multipliers, continuously, independent of whether the underlying trend signal is even changing) was
+never actually charged a cost inside `backtest_eth_btc_portfolio.py` itself. The 1.121 number was
+real, but it lived in a separate verification script, not in the number every other script actually
+optimized against or reported as "the" baseline.
+
+Fixed at the source: `backtest_eth_btc_portfolio.py` now computes `alloc_turnover_cost` (same
+formula already established, `_alloc_turnover`) and subtracts it directly from `combined_return`,
+and `_main_return()` in `backtest_continuous_regime_integrations.py` (used by Mode A validation, the
+LP scripts, and this check) recomputes and charges it fresh for whatever alloc series it's given —
+important because that function also runs on *modified* alloc series (Mode A's state-conviction
+adjustment, LP capital-sharing variants), where a stored baseline-alloc cost would be stale.
+Verified: reconstructing the old pre-fix number from the new one exactly reproduces 1.510 (to 3
+decimals), confirming the fix's magnitude matches what was previously measured.
+
+One caveat, checked and judged acceptable rather than silently assumed away: `eth_strategy_return`/
+`btc_strategy_return` already carry a *sleeve-level* cost from `weight_exec`'s own turnover
+(pre-portfolio-normalization), and that gets scaled by `alloc_eth`/`alloc_btc` when combined into
+the portfolio return. Charging `alloc_turnover_cost` on top is theoretically a small double-count
+at the exact moment a new position is opened (both terms move together). Checked empirically: the
+two turnover series have comparable typical magnitude (median day-to-day `alloc_eth` change 0.006
+vs median sleeve-level turnover 0.011), and since the sleeve-level term gets *scaled down* by
+`alloc_eth` (itself usually well under 1.0) before it reaches the portfolio return, its contribution
+is a small, second-order product of two fractions — not large enough to materially distort the
+result. Not eliminated, but small enough not to block using this fix as the new reference.
+
+**This changes the numbers again, more than any single correction except the lookahead-bias fix:**
+
+|  | Sharpe | CAGR | MaxDD | Walk-forward OOS avg (2021-2024) |
+|---|---|---|---|---|
+| 1c (post-hoc adjustment, now superseded) | 1.510 | 34.2% | -15.6% | 0.938 |
+| **1d (fixed at source, current reference)** | **1.121** | **25.6%** | **-21.0%** | **0.490** |
+
+Per-year walk-forward OOS at the corrected accounting: 2021 Sharpe 1.610 (CAGR 47.2%), **2022
+Sharpe -0.704 (CAGR -0.7%)**, **2023 Sharpe -0.480 (CAGR -1.0%, genuinely negative)**, 2024 Sharpe
+1.536 (CAGR 35.7%). **The walk-forward verdict flips from ROBUST (3/4 positive years) to MIXED (2/4
+positive years)** — 2023 in particular goes from a marginal +0.163 Sharpe to a real loss once its
+own rebalancing is honestly priced, matching the diagnostic finding that ~51% of 2023's cost was
+this exact mechanism. This is the current reference; every number below reflects it.
+
+Mode A and the LP overlay were both re-validated against this corrected baseline and **both
+conclusions hold** — Mode A still doesn't beat baseline (1.093 vs. 1.121, doesn't even need its own
+extra cost added to lose), and LP full-stack integration is still marginally negative (1.121 → 1.113,
+-0.008, same magnitude as before). Neither finding flips; both were already robust to this kind of
+correction.
 
 ### 2. Mode A re-validated — smaller edge than first reported, and it evaporates once fully costed
 
@@ -246,17 +297,20 @@ Three things changed it, each layering on the last:
 
 1. The lookahead-bias fix by itself shrank the gap (walk-forward OOS: baseline 1.144 vs. Mode A's
    1.212, an edge of +0.068, not +0.246).
-2. The cost-model correction shrank the gap further: at 60bps, baseline OOS average is 0.938 vs.
-   Mode A's 0.988 — an edge of only **+0.050**.
-3. Step 3 (vol-filter double-counting check) shows essentially none of that edge is a genuinely new
-   signal: with the vol filter on (production config), Mode A's full-period uplift is **-0.001**
-   (1.510 vs. 1.509, i.e. no uplift at all); the +0.265 uplift only appears with the vol filter
-   switched off, confirming Mode A is substituting for what the vol filter already does, not adding
-   orthogonal information.
-4. Step 4 (incremental rebalancing cost): Mode A's own extra state-transition churn (49.8
-   transitions/year on average) costs real drag once priced. **Mode A does not beat the production
-   baseline even before this extra cost is added (1.509 vs. baseline's 1.510), and is further behind
-   once its own incremental rebalancing is costed (1.444 vs. 1.510).**
+2. The cost-model correction (20→60bps) shrank the gap further: baseline OOS average 0.938 vs.
+   Mode A's 0.988 — an edge of only +0.050.
+3. Step 3 (vol-filter double-counting check) shows essentially none of that edge was ever a
+   genuinely new signal: with the vol filter on (production config), Mode A's full-period uplift is
+   effectively zero or negative at every stage of correction; the large positive uplift only ever
+   appeared with the vol filter switched off, confirming Mode A is substituting for what the vol
+   filter already does, not adding orthogonal information.
+4. The alloc-turnover-cost-at-source fix (1d) — Mode A's own state-transition churn moves
+   `alloc_eth`/`alloc_btc` every time `state` changes, and that's exactly the kind of resizing 1d
+   now charges properly instead of as a post-hoc adjustment. Final result: **Mode A's full-period
+   Sharpe is 1.093 against baseline's 1.121 — it loses before any further "incremental cost"
+   adjustment is even applied**, and its 2021-2024 walk-forward OOS average (0.530) barely edges
+   baseline's (0.490) while flipping sign relationships across individual years (2021/2024 worse,
+   2022/2023 better) in a way consistent with in-sample noise, not a real edge.
 
 **Conclusion, corrected: Mode A does not clear its own bar either**, for essentially the same
 reason LP doesn't — a real but small standalone effect that a more careful accounting (cost, or in
@@ -283,18 +337,19 @@ Chain of research, each step feeding the next:
 - **Full-stack integration** (`scripts/backtest_lp_full_stack.py`): rather than testing LP in
   isolation, integrated it into the actual portfolio backtest across the full corrected 2019-2024
   history, using real Graph-fetched fee/volume data from 2024-04-01 onward (10.30% annualized fee
-  rate) and flagging pre-2024 fee assumptions as unverified. Result (at the corrected 60bps cost):
-  baseline 1.510 → capacity-aware full-stack 1.502 (**-0.008 Sharpe**, unchanged from the 20bps run
-  — this delta is driven by LP's own mechanics, not the trading-cost assumption). Negative at the
-  full-stack level, and worse under a lower-fee-rate sensitivity check.
+  rate) and flagging pre-2024 fee assumptions as unverified. Result (at the corrected 60bps cost,
+  alloc-turnover cost now charged at the source per 1d): baseline 1.121 → capacity-aware full-stack
+  1.113 (**-0.008 Sharpe**, the same magnitude across every cost-model revision so far — this delta
+  is driven by LP's own mechanics, not the trading-cost assumption). Negative at the full-stack
+  level, and worse under a lower-fee-rate sensitivity check.
 - **CHOP vs. LP head-to-head** (`scripts/backtest_lp_chop_comparison.py`): both LP and the existing
   mean-reversion/CHOP overlay compete for the same idle capital window. Standalone, CHOP alone
-  contributes +0.034 Sharpe vs. LP alone's +0.001 (at 60bps cost) — roughly 34x. No capital-sharing
-  split rule tested (50/50, proportional-by-Sharpe, day-by-day severity winner, LP-first/CHOP-leftover,
-  etc.) robustly beat just running CHOP alone; the one variant that looked better (+0.018) affected
-  only 14 days and is judged noise. The two triggers' overlap is small (5.6% of LP-eligible days,
-  concentrated in April 2022) and weakly negatively correlated (-0.142) — not redundant signals,
-  but LP's slice of the opportunity is small regardless.
+  contributes +0.047 Sharpe vs. LP alone's +0.001 — roughly 47x. No capital-sharing split rule tested
+  (50/50, proportional-by-Sharpe, day-by-day severity winner, LP-first/CHOP-leftover, etc.) robustly
+  beat just running CHOP alone; the one variant that looked better (+0.015) affected only 14 days and
+  is judged noise. The two triggers' overlap is small (5.6% of LP-eligible days, concentrated in
+  April 2022) and weakly negatively correlated (-0.142) — not redundant signals, but LP's slice of
+  the opportunity is small regardless.
 
 **Conclusion:** the LP overlay does not clear its own bar at the portfolio level. The execution
 code to run it live was still built and safety-fixed (see below), so the option stays available if
@@ -382,7 +437,7 @@ the ETH sleeve (live force-closes on `BEAR_REGIME`/`DD_OVERRIDE`; the backtest o
 weight down) and the defensive regime scale map (live uses 0.3/0.8 for CHOP/BEAR vs. the backtest's
 0.4/1.0 — live derisks harder in both regimes).
 
-**Three items are flagged as separate, real follow-up projects — not attempted in this pass**,
+**Two items are flagged as separate, real follow-up projects — not attempted in this pass**,
 since each requires a design decision beyond a mechanical fix:
 
 - **Gold sleeve portfolio integration.** Live currently tracks gold as an isolated paper account
@@ -394,12 +449,12 @@ since each requires a design decision beyond a mechanical fix:
   `artifacts/live_trades/daily_pnl.csv` — the guard is dead code. Fixing it properly means building
   a real daily PnL computation (mark-to-market vs. starting balance, what counts as "realised" vs.
   "unrealised") rather than a one-line patch.
-- **Turnover-cost-gap refactor.** The vol-filter/asymmetric-sizing-driven day-to-day change in
-  `alloc_eth`/`alloc_btc` is never costed in the production pipeline (quantified in
-  `scripts/check_baseline_rebalance_cost.py`: ~57.7% cumulative drag over 2019-2024 at the corrected
-  60bps cost if fully priced, up from ~19.2% at the old 20bps assumption). This affects the
-  reference Sharpe itself, not just Mode A — fixing it means re-validating every script built on the
-  current uncosted convention, a real refactor.
+
+**The turnover-cost-gap refactor is done** (see 1d above): `alloc_eth`/`alloc_btc`'s own day-to-day
+resizing is now charged at the source in `backtest_eth_btc_portfolio.py`, not measured post-hoc.
+This dropped the reference Sharpe from 1.510 to 1.121 and flipped the walk-forward verdict from
+ROBUST to MIXED (2023 goes genuinely negative) — a bigger change than the cost-model correction
+below. See 1d for the full numbers and the one accepted double-counting caveat.
 
 **The cost assumption is now resolved** (see 1c above): confirmed actual Kraken trading volume is
 ~$1k-$10k/month, which per Kraken's own published fee schedule means a real taker fee of 0.60% per
@@ -409,6 +464,81 @@ subscription exists but doesn't help here — it only discounts Kraken's simple 
 not the Kraken Pro API `execution_kraken.py` actually trades through. `cost_bps` was corrected from
 20 → 60 everywhere in the codebase and the full validation pipeline rerun; see 1c for the resulting
 numbers.
+
+### 6. Reversal-cooldown investigation: hypothesis rejected
+
+2022 and 2023 are the two weak years driving down the walk-forward average (see 1d). The natural
+hypothesis — the strategy is whipsawing, entering and quickly reversing out of positions — was
+tested directly rather than assumed. A first diagnostic pass (using `weight_exec > 0` runs to define
+trade boundaries) found 5 "quick-reversal" trades in 2022 on both ETH and BTC, 100% of that year's
+cost. **That diagnosis was wrong**: `weight_exec` dips briefly to zero *within* a single real trade
+(from the derisk multiplier or funding-model fallback), which fragments one real position into
+several phantom ones. Redone using the actual entry/exit state machine (`off_active`, what the
+strategy really trades on): **ETH and BTC each had zero real trades in 2022**, and every 2023 trade
+was held 44-266 days — zero quick reversals in either year.
+
+Decomposing 2022's cost directly instead: ETH's contribution is the tail-end unwind of a trade that
+entered in December 2021 (a legitimate exit, not a re-entry); a few days in late January show
+identical ETH/BTC turnover from the *defensive* funding-rate proxy activating briefly — and tracing
+the code confirmed BTC's "defensive" signal is literally ETH's funding-rate proxy, reused as-is
+(`def_proxy = load_eth_defensive_proxy(...)` passed into both `run_sleeve()` calls) — not a bug
+necessarily, but a real architectural fact worth knowing. The largest single component in both years
+turned out to be the same alloc-level turnover-gap fixed in 1d: 40% of 2022's cost, 51% of 2023's.
+
+A post-reversal cooldown (block re-entry on a sleeve for N days after an exit that followed a short
+hold, implemented as `--reversal-cooldown-days`/`--reversal-cooldown-threshold-days` in
+`backtest_eth_btc_portfolio.py`, tested at 5/10/15 days) was still built and tested empirically
+rather than skipped once the diagnosis came back negative. Result: **it never triggers, at any
+length** — confirmed with `reversal_cooldown_blocks` telemetry showing 0 at every setting — and
+produces byte-identical Sharpe/CAGR/MaxDD/trade-counts for every year 2019-2024, cooldown-on or off.
+This both confirms the diagnosis (there's nothing to block) and proves the feature is safe (zero
+impact on the trending years) — it's just solving a problem that doesn't exist in this data. Kept in
+the codebase, default off (`--reversal-cooldown-days 0`), as a documented negative finding rather
+than reverted, following this repo's convention for tested-and-rejected optional features
+(`--stop-loss`, `--dd-aware`).
+
+### 7. Resize deadband: a real but non-surgical improvement, with an overfitting flag
+
+Since 1d found the alloc-level turnover-gap was the dominant cost in both weak years, the natural
+follow-up (implemented as `--resize-deadband` in `backtest_eth_btc_portfolio.py`) is to stop
+`alloc_eth`/`alloc_btc` from resizing on every small daily wobble in the vol-filter/asymmetric-sizing
+multipliers, only updating the executed allocation once the target moves more than a threshold away
+from what's currently held — real entries and exits (the `off_active` flag flipping) always execute
+immediately regardless, so this only throttles resizing *within* an already-held position.
+
+Tested at 0.03/0.05/0.10/0.15 (and further, see below), full-period + walk-forward OOS:
+
+| Deadband | Sharpe | CAGR | MaxDD | Walk-forward OOS avg | ETH/BTC entries |
+|---|---|---|---|---|---|
+| 0.00 (off, current reference) | 1.121 | 25.6% | -21.0% | 0.490 | 8 / 18 |
+| 0.03 | 1.133 | 25.8% | -20.8% | 0.501 | 8 / 18 |
+| 0.05 | 1.138 | 25.9% | -20.9% | 0.505 | 8 / 18 |
+| **0.10 (recommended)** | **1.150** | **26.1%** | **-20.9%** | **0.514** | **8 / 18** |
+| 0.15 | 1.192 | 26.9% | -19.4% | 0.556 | 8 / 18 |
+
+Entry counts are exactly unchanged at every threshold tested — confirmed directly, not assumed —
+so this does not delay or suppress any real entry/exit decision in the trending years or anywhere
+else. That's the good news the original question asked for.
+
+**But it does not answer the question the way it was framed.** The premise was that this would be a
+surgical 2022/2023 fix. It isn't: **the improvement shows up in every year, including the years that
+were already strong** (2019/2020/2021/2024 all improve too), and 2022/2023 improve only modestly and
+inconsistently (2022's Sharpe is flat-to-worse at some thresholds before improving at others; 2023
+improves more steadily but stays negative at every threshold tested up to 0.15). This is a general
+turnover-reduction effect, not a fix targeted at the two weak years specifically.
+
+**Honesty check, not just a recommendation:** the improvement continues monotonically well past any
+threshold that's still a "deadband" in spirit — tested to 0.40 (40 percentage points), full-period
+Sharpe kept climbing (1.211 at 0.30, 1.342 at 0.40) with walk-forward OOS averages up to 0.754. A
+0.40 deadband is no longer "filter out small noise" — at that size the position is close to
+static once entered, a materially different and more aggressive behavior than what was actually
+being tested. A pattern that keeps improving all the way to "barely resize at all" is a flag for
+overfitting to this specific 2019-2024 period, not a green light to pick the largest number tested.
+**Recommendation: 0.10 as a moderate, evidence-backed starting point** (clear improvement, still
+recognizably the original strategy with noise filtered out) — not currently defaulted on
+(`--resize-deadband 0.0` remains the default), and anything beyond ~0.15 should get real
+out-of-sample/robustness scrutiny (different assets, different periods) before being trusted, not
+just a bigger backtest number.
 
 ## Frozen Research Branches
 
