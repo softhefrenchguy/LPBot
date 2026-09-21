@@ -1159,6 +1159,15 @@ def _run() -> int:
                 .last()
                 .rename(columns={cc: "close"})
             )
+            # The current UTC day's bar is still forming when this runs (cron is 08:00 UTC), so its
+            # "close" is just the latest 5m price, not a finalized daily close. The validated backtest
+            # only ever sees finalized daily closes (decide on close(t), trade at open(t+1)); feeding a
+            # partial bar into the EMAs / stack-confirmation window / 20d drawdown / mean-reversion
+            # z-score let a half-finished day count as a confirmation day. Use finalized days only.
+            # eth_price below still uses the latest 5m bar (live spot for display and 24h change).
+            _finalized_daily = pdaily[pdaily["day"] < now.floor("D")]
+            if len(_finalized_daily):
+                pdaily = _finalized_daily
             c = pd.to_numeric(pdaily["close"], errors="coerce")
             daily_close = pd.Series(c.to_numpy(dtype=float), index=pdaily["day"])
             ema21_s = c.ewm(span=int(args.off_ema_fast), adjust=False).mean()

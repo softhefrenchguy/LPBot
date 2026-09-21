@@ -73,6 +73,11 @@ def main() -> int:
     out_path = Path(args.out)
     rows = _read_existing(out_path)
     klines = _fetch_klines(symbol=str(args.symbol), limit=int(args.limit), timeout_sec=float(args.timeout_sec))
+    # Binance returns the current, still-forming daily candle as the last row when queried without an
+    # explicit endTime (close_time, index 6, is in the future for it). Treating that as a finalized
+    # daily close is the same partial-candle bug fixed in download_btc_daily.py -- drop it.
+    now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
+    klines = [k for k in klines if len(k) > 6 and int(k[6]) <= now_ms]
     for k in klines:
         try:
             row = _row_from_kline(k)
