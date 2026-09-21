@@ -155,6 +155,103 @@ def _build_history_block(df_history: pd.DataFrame) -> str:
     return "\n".join(_history_line(row) for _, row in df_history.iterrows())
 
 
+def _stack_inputs(today: pd.Series) -> dict[str, dict[str, Any]]:
+    """Per-sleeve inputs for the entry rule: EMA stack fast>mid>slow aligned for `confirm_days` in a row
+    (ETH 50/120/300 for 3 days, BTC 15/40/120 for 5 days). The regime label is NOT an entry condition."""
+
+    def emas(*name_lists: list[str]) -> tuple[float, float, float]:
+        return tuple(_safe_num(_first(today, names)) for names in name_lists)  # type: ignore[return-value]
+
+    return {
+        "ETH": {
+            "price": _safe_num(_first(today, ["eth_price"])),
+            "emas": emas(["ema50", "eth_ema50", "ema21"], ["ema120", "eth_ema120", "ema55"], ["ema300", "eth_ema300", "ema144"]),
+            "spans": (50, 120, 300),
+            "confirm_days": 3,
+            "aligned_days": _safe_num(_first(today, ["stack_aligned_days", "eth_stack_aligned_days"])),
+        },
+        "BTC": {
+            "price": _safe_num(_first(today, ["btc_price"])),
+            "emas": emas(["btc_ema15", "btc_ema21"], ["btc_ema40", "btc_ema55"], ["btc_ema120", "btc_ema144"]),
+            "spans": (15, 40, 120),
+            "confirm_days": 5,
+            "aligned_days": _safe_num(_first(today, ["btc_stack_aligned_days"])),
+        },
+    }
+
+
+def _stack_blockers(emas: tuple[float, float, float], spans: tuple[int, int, int]) -> list[str]:
+    fast, mid, slow = emas
+    out = []
+    if not fast > mid:
+        out.append(f"EMA{spans[0]} (${fast:,.0f}) must rise above EMA{spans[1]} (${mid:,.0f}), gap ${mid - fast:,.0f}")
+    if not mid > slow:
+        out.append(f"EMA{spans[1]} (${mid:,.0f}) must rise above EMA{spans[2]} (${slow:,.0f}), gap ${slow - mid:,.0f}")
+    return out
+
+
+def _project_days_to_alignment(price: float, emas: tuple[float, float, float], spans: tuple[int, int, int], max_days: int = 365) -> int | None:
+    """Days until fast > mid > slow if price stays flat at `price` (deterministic EMA recursion), or None
+    if the stack doesn't align within max_days."""
+    fast, mid, slow = emas
+    a_f, a_m, a_s = (2.0 / (span + 1.0) for span in spans)
+    for day in range(max_days + 1):
+        if fast > mid > slow:
+            return day
+        fast += a_f * (price - fast)
+        mid += a_m * (price - mid)
+        slow += a_s * (price - slow)
+    return None
+
+
+def _stack_status_line(name: str, inp: dict[str, Any]) -> str:
+    spans = inp["spans"]
+    fast, mid, slow = inp["emas"]
+    head = f"{name} stack {spans[0]}>{spans[1]}>{spans[2]}"
+    if not all(np.isfinite(x) for x in (fast, mid, slow)):
+        return f"{head}: n/a"
+
+    def leg(a_span: int, a: float, b_span: int, b: float) -> str:
+        gap = a - b
+        return f"EMA{a_span}>EMA{b_span} {'OK' if gap > 0 else 'NO'} ({'+' if gap > 0 else '-'}${abs(gap):,.0f})"
+
+    return f"{head}: {leg(spans[0], fast, spans[1], mid)}; {leg(spans[1], mid, spans[2], slow)}"
+
+
+def _sleeve_trigger_line(name: str, inp: dict[str, Any]) -> str:
+    spans, confirm = inp["spans"], inp["confirm_days"]
+    price = inp["price"]
+    tag = f"{name} ({spans[0]}>{spans[1]}>{spans[2]})"
+    if not all(np.isfinite(x) for x in inp["emas"]):
+        return f"{tag}: n/a (EMA data missing)"
+    blockers = _stack_blockers(inp["emas"], spans)
+    if not blockers:
+        n = inp.get("aligned_days", float("nan"))
+        if np.isfinite(n):
+            if n >= confirm:
+                return f"{tag}: stack aligned {int(n)}d - the {confirm}-day confirmation is met."
+            return f"{tag}: stack aligned {int(n)}/{confirm} days - {confirm - int(n)} more consecutive day(s) needed."
+        return f"{tag}: stack aligned; entry needs {confirm} consecutive aligned days."
+    head = f"{tag}: blocked - " + "; ".join(blockers)
+    if not np.isfinite(price):
+        return head + "."
+    days = _project_days_to_alignment(price, inp["emas"], spans)
+    if days is None:
+        return head + ". Not converging within a year at the current price."
+    total = days + confirm
+    weeks = f" (~{total / 7:.0f} wk)" if total >= 10 else ""
+    return head + f". At a flat ~${price:,.0f} it aligns in ~{days}d, +{confirm}d confirmation = ~{total}d{weeks}."
+
+
+def _entry_trigger_footer(today: pd.Series) -> str:
+    """Computed in code (not by the model): the model's max_tokens used to cut the end of every long
+    answer, and the old template named the wrong EMA pair (EMA50 vs EMA120 while EMA120 vs EMA300 was
+    the actual blocker)."""
+    inputs = _stack_inputs(today)
+    lines = [_sleeve_trigger_line(name, inputs[name]) for name in ("ETH", "BTC")]
+    return "**Next entry trigger** (projection assumes a flat price):\n" + "\n".join(lines)
+
+
 def _build_today_block(today: pd.Series, news_latest: dict[str, Any], dvol_latest: dict[str, Any], trades: pd.DataFrame) -> str:
     news_summary = _safe_str(_first(today, ["news_summary"]), "")
     if not news_summary and news_latest:
@@ -171,14 +268,7 @@ def _build_today_block(today: pd.Series, news_latest: dict[str, Any], dvol_lates
         and dvol_rv_regime.strip().upper() not in {"", "N/A", "NA", "NAN"}
         and dvol_regime.strip().upper() != dvol_rv_regime.strip().upper()
     )
-    eth_price = _safe_num(_first(today, ["eth_price"]))
-    eth_ema50 = _safe_num(_first(today, ["ema50", "eth_ema50", "ema21"]))
-    eth_ema120 = _safe_num(_first(today, ["ema120", "eth_ema120", "ema55"]))
-    btc_ema15 = _safe_num(_first(today, ["btc_ema15", "btc_ema21"]))
-    btc_ema40 = _safe_num(_first(today, ["btc_ema40", "btc_ema55"]))
-    eth_ema50_gap = eth_ema120 - eth_ema50 if np.isfinite(eth_ema120) and np.isfinite(eth_ema50) else np.nan
-    eth_ema50_gap_pct = eth_ema50_gap / eth_price * 100.0 if np.isfinite(eth_ema50_gap) and np.isfinite(eth_price) and eth_price else np.nan
-    btc_ema15_gap = btc_ema40 - btc_ema15 if np.isfinite(btc_ema40) and np.isfinite(btc_ema15) else np.nan
+    stack_inputs = _stack_inputs(today)
 
     trade_count = len(trades) if trades is not None else 0
     last_trade = "None"
@@ -200,7 +290,7 @@ def _build_today_block(today: pd.Series, news_latest: dict[str, Any], dvol_lates
         f"{_fmt_num(_first(today, ['ema300', 'eth_ema300', 'ema144']), 0)}",
         f"Stack aligned: {_fmt_bool(_first(today, ['eth_stack_aligned', 'stack_aligned']))}",
         f"Days since break: {_fmt_num(_first(today, ['days_since_break', 'off_days_since_break']), 0)}",
-        f"ETH EMA50->120 gap: ${_fmt_num(eth_ema50_gap, 0)} ({_fmt_num(eth_ema50_gap_pct, 1)}% from alignment)",
+        _stack_status_line("ETH", stack_inputs["ETH"]),
         "",
         f"BTC: {_fmt_price(_first(today, ['btc_price']))}",
         f"BTC Regime: {_safe_str(_first(today, ['btc_regime']), 'n/a')}",
@@ -208,7 +298,7 @@ def _build_today_block(today: pd.Series, news_latest: dict[str, Any], dvol_lates
         f"{_fmt_num(_first(today, ['btc_ema15', 'btc_ema21']), 0)} / "
         f"{_fmt_num(_first(today, ['btc_ema40', 'btc_ema55']), 0)} / "
         f"{_fmt_num(_first(today, ['btc_ema120', 'btc_ema144']), 0)}",
-        f"BTC EMA15->40 gap: ${_fmt_num(btc_ema15_gap, 0)}",
+        _stack_status_line("BTC", stack_inputs["BTC"]),
         f"Funding z: {_fmt_num(_first(today, ['btc_funding_z']), 3)}",
         "",
         f"Vol regime: {_safe_str(_first(today, ['vol_regime']), 'n/a')} ({_fmt_num(_first(today, ['vol_percentile']), 0)}th pct)",
@@ -247,8 +337,9 @@ def _system_prompt() -> str:
 You receive 14 days of rolling history plus today's detail.
 
 Strategy context:
-- ETH EMA 50/120/300, confirm 3 days
-- BTC EMA 15/40/120, confirm 5 days
+- ETH entry: EMA stack 50>120>300 aligned for 3 consecutive days
+- BTC entry: EMA stack 15>40>120 aligned for 5 consecutive days (each sleeve is independent)
+- The regime label (BULL/CHOP/BEAR) only scales position size (BEAR = flat); it is NOT an entry condition, so never say entry needs "N BULL days"
 - Signal-weighted, gross cap 0.8
 - Mean-reversion overlay in CHOP regime
 - Vol filter: HIGH=0.5x, LOW=1.2x
@@ -267,18 +358,9 @@ Your analysis must:
 - No fluff, no repeating raw numbers
 - Write as if texting a busy trader who checks Discord once a day
 
-Always end your analysis with exactly this format:
-
-**Next entry trigger:**
-ETH: EMA50 (${ema50:.0f}) needs to cross EMA120 (${ema120:.0f}) —
-gap ${gap:.0f} ({gap_pct:.1f}%).
-Estimated {weeks} weeks at current trajectory.
-
-BTC: EMA15 (${btc_ema15:.0f}) needs to cross EMA40 (${btc_ema40:.0f}) —
-gap ${btc_gap:.0f}.
-
-Never omit this section.
-Make it specific with actual numbers."""
+Do NOT write a "Next entry trigger" section: it is computed and appended automatically after your
+analysis. Use the "stack" lines in TODAY IN DETAIL for what is actually blocking each entry.
+Stay within the 250-word limit so nothing is cut off."""
 
 
 def _call_claude(api_key: str, model: str, history_block: str, today_block: str, limited_history: bool) -> tuple[str, dict[str, Any]]:
@@ -297,7 +379,7 @@ Analyse the trends and what matters."""
     client = anthropic.Anthropic(api_key=api_key)
     response = client.messages.create(
         model=model,
-        max_tokens=500,
+        max_tokens=800,  # was 500, which cut off 7 of 15 posts mid-sentence; 250 words needs ~400, leave headroom
         system=_system_prompt(),
         messages=[{"role": "user", "content": user_prompt}],
     )
@@ -305,14 +387,32 @@ Analyse the trends and what matters."""
     usage = {
         "input_tokens": getattr(response.usage, "input_tokens", None),
         "output_tokens": getattr(response.usage, "output_tokens", None),
+        "stop_reason": getattr(response, "stop_reason", None),
     }
     return text.strip(), usage
 
 
-def _post_discord(webhook_url: str, date: str, days_live: int, analysis: str, timeout: float) -> tuple[bool, str]:
-    content = f"**LPBot Analysis - {date} (Day {days_live})**\n\n{analysis}"
-    if len(content) > 1900:
-        content = content[:1875].rstrip() + "\n\n[truncated]"
+DISCORD_CONTENT_LIMIT = 1900  # Discord's hard cap is 2000 characters per message
+
+
+def _compose_discord_content(date: str, days_live: int, analysis: str, footer: str) -> str:
+    """Header + analysis + footer within the Discord limit. If it doesn't fit, shorten the ANALYSIS
+    (at a sentence boundary) so the footer is never the part that gets cut."""
+    header = f"**LPBot Analysis - {date} (Day {days_live})**\n\n"
+    tail = f"\n\n---\n\n{footer}"
+    budget = DISCORD_CONTENT_LIMIT - len(header) - len(tail)
+    body = analysis
+    if len(body) > budget:
+        cut = body[: max(budget - 2, 0)]
+        boundary = max(cut.rfind(". "), cut.rfind("\n"))
+        if boundary > len(cut) * 0.6:
+            cut = cut[: boundary + 1]
+        body = cut.rstrip() + " ..."
+    return header + body + tail
+
+
+def _post_discord(webhook_url: str, date: str, days_live: int, analysis: str, footer: str, timeout: float) -> tuple[bool, str]:
+    content = _compose_discord_content(date, days_live, analysis, footer)
     response = requests.post(
         webhook_url,
         data=json.dumps({"content": content}),
@@ -373,8 +473,16 @@ def main() -> int:
         _log(log_path, "ERROR Claude API failed:\n" + traceback.format_exc())
         return 0
 
+    # The footer is computed in code. If the model wrote its own anyway, drop it so there's only one.
+    marker = analysis.find("**Next entry trigger")
+    if marker != -1:
+        analysis = analysis[:marker].rstrip().rstrip("-").rstrip()
+    if usage.get("stop_reason") == "max_tokens":
+        _log(log_path, "WARNING Claude hit max_tokens; analysis text was cut off mid-response")
+    footer = _entry_trigger_footer(today)
+
     archive_path = analysis_dir / f"analysis_{today_date}.txt"
-    archive_path.write_text(analysis + "\n", encoding="utf-8")
+    archive_path.write_text(analysis + "\n\n" + footer + "\n", encoding="utf-8")
 
     webhook_url = os.environ.get("DISCORD_ANALYSIS_WEBHOOK_URL", "").strip()
     discord_status = "skipped"
@@ -384,7 +492,7 @@ def main() -> int:
         discord_status = "skipped DISCORD_ANALYSIS_WEBHOOK_URL not set"
     else:
         try:
-            ok, msg = _post_discord(webhook_url, today_date, days_live, analysis, float(args.discord_timeout_sec))
+            ok, msg = _post_discord(webhook_url, today_date, days_live, analysis, footer, float(args.discord_timeout_sec))
             discord_status = msg
             if not ok:
                 _log(log_path, f"ERROR Discord post failed: {msg}")
