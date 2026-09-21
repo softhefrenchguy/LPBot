@@ -413,6 +413,8 @@ everything else found and fixed in this pass:
   the last row when queried without an explicit `endTime` — both `download_btc_daily.py` and
   `paper_trade_checklist.py`'s direct fetch now drop any candle whose `close_time` hasn't passed
   yet, instead of treating a partial (as little as a few hours') daily bar as a finalized close.
+  **This first pass was incomplete** — it missed ETH's main path (the EMAs are built from the 5m
+  price file, not a klines fetch); see section 8 for the follow-up.
 - **Smaller fixes**: `joblib` added to `requirements.txt` (was imported but undeclared); the
   `--cost-bps`/`--gold-cost-bps` CLI defaults in `backtest_eth_btc_portfolio.py` corrected from
   10→20 to match the validated config (running the script bare previously understated cost); the
@@ -539,6 +541,36 @@ recognizably the original strategy with noise filtered out) — not currently de
 (`--resize-deadband 0.0` remains the default), and anything beyond ~0.15 should get real
 out-of-sample/robustness scrutiny (different assets, different periods) before being trusted, not
 just a bigger backtest number.
+
+### 8. Review of the live Discord analyses (Sep 2026): partial-candle follow-up and analysis fixes
+
+Two weeks of real "LPBot Analysis" Discord posts (Sep 7-21) were checked against the code. The bot was
+flat throughout, so none of the section-5 live changes (BTC exit days, gross cap, vol-scaled sizing)
+were observable in them, and they can't confirm which code version the server runs (see
+`docs/HETZNER_RUNBOOK.md` for how to check). They did surface three real problems:
+
+- **Partial-candle fix was incomplete (ETH).** ETH's EMAs, stack alignment, 20d drawdown and the
+  mean-reversion z-score are built from `data/ETHUSDC_5m.csv` by taking the last row of each day, so
+  the still-forming current-day bar (the cron runs at 08:00 UTC) was counted as a full day. Section 5's
+  fix only covered the Binance klines fetch and the BTC downloader. Now `paper_trade_checklist.py`
+  drops the in-progress UTC day from the daily series (live spot price and the 24h change still use the
+  latest 5m bar), and `download_paxg_daily.py` gets the same filter as the BTC downloader. Simulating
+  the 08:00 UTC cron on every day of the local 5m history (1,394 days, 2021-2026): including the partial
+  bar changed the ETH entry-confirmation signal on **7 days (0.5%)**, in both directions (3 false
+  "entry confirmed", 4 missed), with EMA50 off by a median of $8 (max $50). Rare, but it lands
+  exactly on the decision days. Verified end to end by running the real script on a shifted 5m file
+  that contains a partial "today" bar: its EMAs match the finalized-only values exactly.
+- **Wrong "Next entry trigger" footer.** `analyse_daily.py` had a fixed template that always said
+  "EMA50 needs to cross EMA120" (and fed the model a matching wrong-pair gap), while the real entry
+  rule is the stack EMA50>EMA120>EMA300 and EMA50 was already above EMA120 for the whole window; the
+  actual blocker was EMA120 vs EMA300. The footer is now computed in code: it names the blocking
+  leg(s) with gaps, the days already aligned when applicable, and a flat-price EMA projection to
+  alignment (Sep 21 numbers give ~37 days + 3 days confirmation, about 6 weeks). The prompt also no
+  longer lets the model claim entry needs "N BULL days" — the regime label only scales size.
+- **Posts cut off mid-sentence.** The Claude call used `max_tokens=500`; 7 of the 15 posts (Sep 7, 8,
+  11, 15, 18, 20, 21) lost the end of the answer, including the footer. Raised to 800, stop reason is
+  logged, and the Discord message is composed so that if anything must be shortened it is the analysis,
+  never the footer.
 
 ## Frozen Research Branches
 

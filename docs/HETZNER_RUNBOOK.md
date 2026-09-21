@@ -49,13 +49,43 @@ On the server:
 ```bash
 cd ~/LPBot
 git fetch origin
-git checkout feat/low-risk-investr
-git pull --ff-only origin feat/low-risk-investr
+git checkout main
+git pull --ff-only origin main
 docker-compose build
 docker-compose up -d
 ```
 
-If the production branch changes, replace `feat/low-risk-investr` with the deployed branch.
+The production branch is `main`. (This section used to say `feat/low-risk-investr`, which no longer
+exists on origin, so following it would fail the pull and silently leave the server on old code.)
+If the production branch changes again, replace `main` above with the deployed branch.
+
+### What updates on `git pull` vs. what needs a rebuild
+
+`scripts/run_paper_check_daily.sh` defaults to `USE_DOCKER=1`: it refreshes the 5m price file and runs
+the daily paper check inside the `lpbot` container, piping `scripts/paper_trade_checklist.py` in from
+the host checkout. `docker-compose.yml` mounts `./scripts`, `./config`, `./data`, `./artifacts` and
+`./logs` from the host. So:
+
+- **`git pull` on the host is what updates the checklist script and config** that produce the daily
+  Discord summary. No rebuild is needed for those.
+- **`docker-compose build` is only needed for the Python environment** (`requirements.txt`, the
+  Dockerfile). The pins need the Python 3.13 base the Dockerfile uses. If a rebuild fails, the old
+  image keeps running, with the newly pulled scripts on top of the old libraries.
+- Host-cron jobs such as `python scripts/download_btc_daily.py` use the host's `python3`, not the
+  container.
+
+### Verify what the server is actually running
+
+```bash
+cd ~/LPBot
+git rev-parse --abbrev-ref HEAD && git log -1 --format='%h %ad %s'
+docker-compose exec -T lpbot python -c "import sys, pandas, numpy; print(sys.version.split()[0], pandas.__version__, numpy.__version__)"
+```
+
+Expect branch `main` at the latest commit you pushed, and (once the pinned image is running) Python
+3.13.x with pandas 3.0.5 and numpy 2.5.2. A different branch or an old commit date means the daily
+Discord summaries are still coming from old code; older library versions mean the image was never
+rebuilt with the pins.
 
 ## Required `.env`
 
