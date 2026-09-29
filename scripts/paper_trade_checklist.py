@@ -293,6 +293,29 @@ def _filter_log_to_current_config(
     return d.iloc[0:0].copy(), bool(len(d))
 
 
+def _prune_stale_log_rows(raw: pd.DataFrame, matched: pd.DataFrame, log_path: Path) -> None:
+    """Once a config-fingerprint mismatch is found, the stale rows would otherwise sit in
+    the log forever: it's append-only (the write path below only ever drops today's own
+    row before re-appending it, never historical ones), so every future run would re-read
+    the same stale rows and re-append "..._epoch_reset_config_changed" to reviews forever,
+    even though the mismatch happened once. Archive the dropped rows (never silently lose
+    history) and persist only the matching ones, so the flag actually clears from here on."""
+    if len(matched) == len(raw):
+        return
+    dropped = raw.drop(matched.index, errors="ignore")
+    if len(dropped):
+        stamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%dT%H%M%S")
+        archive_path = log_path.with_name(f"{log_path.stem}_pre_migration_{stamp}{log_path.suffix}")
+        try:
+            dropped.to_csv(archive_path, index=False)
+        except Exception:
+            pass
+    try:
+        matched.to_csv(log_path, index=False)
+    except Exception:
+        pass
+
+
 def _vol_filter_state(daily_close: pd.Series, cfg: dict[str, object]) -> dict[str, object]:
     out = {
         "vol_regime": "NA",
@@ -1022,6 +1045,7 @@ def _run() -> int:
     p.add_argument("--gold-notional-gbp", type=float, default=10000.0)
     p.add_argument("--gold-state-json", default="artifacts/paper_trade/gold_sleeve_state.json")
     p.add_argument("--news-log-csv", default="artifacts/news/news_log.csv")
+    p.add_argument("--shadow-ema-severity-threshold", default="high", help="News severity level (low/medium/high) that activates the shadow fast-EMA comparison. Logged only -- never affects real position sizing.")
     p.add_argument("--dvol-log-csv", default="artifacts/options/dvol_log.csv")
     p.add_argument("--market-log-csv", default="artifacts/markets/market_tracker.csv")
     p.add_argument(
@@ -1145,6 +1169,8 @@ def _run() -> int:
     stack_aligned = False
     stack_aligned_days = np.nan
     entry_threshold_met = False
+    eth_shadow_stack_aligned = False
+    eth_shadow_entry_threshold_met = False
     dd_20d = np.nan
     eth_price = np.nan
     eth_24h_pct = np.nan
@@ -1182,6 +1208,22 @@ def _run() -> int:
             rev_stack = stack.astype(int).iloc[::-1]
             stack_aligned_days = int(rev_stack.cumprod().sum()) if len(rev_stack) else np.nan
             entry_threshold_met = bool(stack_confirm.iloc[-1]) if len(stack_confirm) else False
+
+            # Shadow signal (logged only, never wired into off_target/weight_exec/real sizing):
+            # does a faster EMA stack, gated to high-severity news days, confirm sooner than the
+            # real one? Uses news_sentiment.py's existing "severity" field (already computed daily,
+            # previously unused for anything but display) -- no new data pipeline needed. Spans and
+            # confirm-days are simply halved (rounded), a first, deliberately simple choice rather
+            # than a tuned one.
+            eth_shadow_fast, eth_shadow_mid, eth_shadow_slow = max(2, int(args.off_ema_fast) // 2), max(3, int(args.off_ema_mid) // 2), max(4, int(args.off_ema_slow) // 2)
+            eth_shadow_confirm = max(1, int(args.off_confirm_days) // 2)
+            sf = c.ewm(span=eth_shadow_fast, adjust=False).mean()
+            sm = c.ewm(span=eth_shadow_mid, adjust=False).mean()
+            ss = c.ewm(span=eth_shadow_slow, adjust=False).mean()
+            shadow_stack = (sf > sm) & (sm > ss)
+            shadow_confirm = shadow_stack.rolling(eth_shadow_confirm, min_periods=eth_shadow_confirm).min() == 1
+            eth_shadow_stack_aligned = bool(shadow_stack.iloc[-1]) if len(shadow_stack) else False
+            eth_shadow_entry_threshold_met = bool(shadow_confirm.iloc[-1]) if len(shadow_confirm) else False
             if ema21 > ema55 > ema144:
                 ema_state = f"bullish_{int(args.off_ema_fast)}>{int(args.off_ema_mid)}>{int(args.off_ema_slow)}"
             elif ema21 < ema55 < ema144:
@@ -1615,6 +1657,8 @@ def _run() -> int:
     btc_stack_aligned = False
     btc_stack_aligned_days = np.nan
     btc_entry_threshold_met = False
+    btc_shadow_stack_aligned = False
+    btc_shadow_entry_threshold_met = False
     btc_off_w = 0.0
     btc_off_pos = False
     btc_off_entry_ts = pd.NaT
@@ -1654,6 +1698,17 @@ def _run() -> int:
             b_entry = (b_stack.rolling(int(args.btc_confirm_days), min_periods=int(args.btc_confirm_days)).min() == 1).fillna(False)
             b_exit = ((~b_stack).rolling(int(args.btc_exit_confirm_days), min_periods=int(args.btc_exit_confirm_days)).min() == 1).fillna(False)
             btc_entry_threshold_met = bool(b_entry.iloc[-1]) if len(b_entry) else False
+
+            # Shadow signal, same idea as ETH's above -- see that comment for the full rationale.
+            btc_shadow_fast, btc_shadow_mid, btc_shadow_slow = max(2, int(args.btc_ema_fast) // 2), max(3, int(args.btc_ema_mid) // 2), max(4, int(args.btc_ema_slow) // 2)
+            btc_shadow_confirm = max(1, int(args.btc_confirm_days) // 2)
+            bsf = btc_close_s.ewm(span=btc_shadow_fast, adjust=False).mean()
+            bsm = btc_close_s.ewm(span=btc_shadow_mid, adjust=False).mean()
+            bss = btc_close_s.ewm(span=btc_shadow_slow, adjust=False).mean()
+            btc_shadow_stack = (bsf > bsm) & (bsm > bss)
+            btc_shadow_confirm_s = btc_shadow_stack.rolling(btc_shadow_confirm, min_periods=btc_shadow_confirm).min() == 1
+            btc_shadow_stack_aligned = bool(btc_shadow_stack.iloc[-1]) if len(btc_shadow_stack) else False
+            btc_shadow_entry_threshold_met = bool(btc_shadow_confirm_s.iloc[-1]) if len(btc_shadow_confirm_s) else False
 
             b_r = np.log(btc_close_s / btc_close_s.shift(1)).fillna(0.0)
             b_rv = b_r.rolling(int(args.btc_vol_window), min_periods=max(5, int(args.btc_vol_window) // 2)).std() * np.sqrt(252.0)  # was sqrt(365); matches backtest annualization convention (return-type/ddof still differ -- not part of this fix, see README)
@@ -1852,15 +1907,16 @@ def _run() -> int:
                 ex_rows = []
                 if live_log_path.exists():
                     try:
-                        lg_prev = pd.read_csv(live_log_path, low_memory=False)
+                        lg_prev_raw = pd.read_csv(live_log_path, low_memory=False)
                         lg_prev, migrated = _filter_log_to_current_config(
-                            lg_prev,
+                            lg_prev_raw,
                             config_fingerprint,
                             ("eth_ema_fast", "eth_ema_mid", "eth_ema_slow"),
                             (int(args.off_ema_fast), int(args.off_ema_mid), int(args.off_ema_slow)),
                         )
                         if migrated:
                             reviews.append("paper_performance_epoch_reset_config_changed")
+                            _prune_stale_log_rows(lg_prev_raw, lg_prev, live_log_path)
                         lg_prev = lg_prev[["date", "combined_weight"]]
                         lg_prev["day"] = pd.to_datetime(lg_prev["date"], utc=True, errors="coerce").dt.floor("D")
                         lg_prev["combined_weight"] = pd.to_numeric(lg_prev["combined_weight"], errors="coerce")
@@ -1901,15 +1957,16 @@ def _run() -> int:
             b_ex_rows = []
             if btc_log_path.exists():
                 try:
-                    bl_prev = pd.read_csv(btc_log_path, low_memory=False)
+                    bl_prev_raw = pd.read_csv(btc_log_path, low_memory=False)
                     bl_prev, migrated = _filter_log_to_current_config(
-                        bl_prev,
+                        bl_prev_raw,
                         config_fingerprint,
                         ("btc_ema_fast", "btc_ema_mid", "btc_ema_slow"),
                         (int(args.btc_ema_fast), int(args.btc_ema_mid), int(args.btc_ema_slow)),
                     )
                     if migrated:
                         reviews.append("btc_performance_epoch_reset_config_changed")
+                        _prune_stale_log_rows(bl_prev_raw, bl_prev, btc_log_path)
                     bl_prev = bl_prev[["date", "btc_combined_weight"]]
                     bl_prev["day"] = pd.to_datetime(bl_prev["date"], utc=True, errors="coerce").dt.floor("D")
                     bl_prev["btc_combined_weight"] = pd.to_numeric(bl_prev["btc_combined_weight"], errors="coerce")
@@ -2075,6 +2132,17 @@ def _run() -> int:
     else:
         news_alert_line = "News: No major macro events"
     dvol_row = _latest_dvol_row(Path(args.dvol_log_csv))
+
+    # Shadow-signal severity gate: logged only, never wired into off_target/weight_exec. See the
+    # ETH/BTC shadow-EMA comments above for what these compare against.
+    shadow_gate_active = news_severity.strip().lower() == str(args.shadow_ema_severity_threshold).strip().lower()
+    eth_shadow_diverges = bool(shadow_gate_active and (eth_shadow_entry_threshold_met != entry_threshold_met))
+    btc_shadow_diverges = bool(shadow_gate_active and (btc_shadow_entry_threshold_met != btc_entry_threshold_met))
+    print(
+        f"Shadow fast-EMA (logged only, no effect on sizing): news_severity={news_severity} "
+        f"gate_active={shadow_gate_active} | ETH diverges={eth_shadow_diverges} (real={entry_threshold_met} shadow={eth_shadow_entry_threshold_met}) "
+        f"| BTC diverges={btc_shadow_diverges} (real={btc_entry_threshold_met} shadow={btc_shadow_entry_threshold_met})"
+    )
 
     if np.isfinite(rolling_30d_sharpe) and rolling_30d_sharpe < float(args.stop_rolling_sharpe):
         stops.append("rolling_30d_sharpe_below_stop")
@@ -2304,6 +2372,13 @@ def _run() -> int:
         "off_days_since_break": off_days_since_break,
         "off_exit_confirmed": bool(off_exit_confirmed),
         "entry_threshold_met": bool(entry_threshold_met),
+        "eth_shadow_fast_ema_stack_aligned": bool(eth_shadow_stack_aligned),
+        "eth_shadow_fast_ema_entry_threshold_met": bool(eth_shadow_entry_threshold_met),
+        "eth_shadow_fast_ema_diverges_today": bool(eth_shadow_diverges),
+        "btc_shadow_fast_ema_stack_aligned": bool(btc_shadow_stack_aligned),
+        "btc_shadow_fast_ema_entry_threshold_met": bool(btc_shadow_entry_threshold_met),
+        "btc_shadow_fast_ema_diverges_today": bool(btc_shadow_diverges),
+        "shadow_ema_gate_active_today": bool(shadow_gate_active),
         "dd_20d": dd_20d,
         "eth_price": eth_price,
         "eth_24h_pct": eth_24h_pct,

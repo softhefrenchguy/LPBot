@@ -589,6 +589,51 @@ flat" turned out to be wrong in a way none of the three caught; see item 4.
   writing anything about entries. Verified against the real Sep 29 numbers (BTC open since 2026-08-31,
   29d held, +6.22%): the footer and data block now reproduce that correctly.
 
+### 9. Stuck `epoch_reset_config_changed` flag, and a shadow-mode news-severity experiment
+
+Reviewing the checklist's own raw Discord posts (Aug 31 - Sep 29, 29 days straight) surfaced a second,
+independent bug: `Health: Status: REVIEW` with `paper_performance_epoch_reset_config_changed` and
+`btc_performance_epoch_reset_config_changed` fired on **every single day**, never clearing. Traced to
+`_filter_log_to_current_config()`: it correctly excludes historical log rows that don't match today's
+`config_fingerprint` from performance calculations (so an old config's weights never get blended into
+a new one's cumulative return), and flags a review the day it finds a mismatch — but the log itself is
+append-only and never gets pruned. So once a single row anywhere in the log's history lacks a matching
+fingerprint (e.g. from before the fingerprint column existed, or from before a genuine config change),
+every future run re-reads that same stale row and re-fires the flag, forever, with no way to self-clear.
+Fixed: the first time a mismatch is detected, the stale rows are archived to a timestamped backup file
+(nothing is silently lost) and the on-disk log is pruned to just the matching rows, so the flag actually
+clears from the next run on. Verified with a simulated multi-day run: fires once, self-clears, stays
+clear, and still correctly re-fires on a genuinely new config change later.
+
+Separately: comparing the two weeks of real BTC returns against the news headlines in the same posts,
+the two largest moves in the whole window both landed on named news events — the worst day (-3.78%,
+Sep 16) was the CLARITY Act Senate failure ($570M in crypto liquidations), and the best day (+10.22%,
+Sep 22) was a BTC ETF-inflow spike. That's suggestive, but it's two data points in 29 days, nowhere
+near enough to call it a pattern. A proper backtest of "react faster around big news" would need
+historical, point-in-time news-severity data for 2019-2024, which doesn't exist in this repo — the
+existing `prototype_gdelt_bear_news_classifier.py` is explicitly marked "not production wiring," and
+building a trustworthy retroactive version is a real project of its own, not something to bolt on for
+a quick check.
+
+What was actually added is a **shadow-only** comparison, with zero effect on real trading, so it can
+start accumulating genuine forward evidence instead of waiting on a historical dataset that doesn't
+exist: `paper_trade_checklist.py` now also computes a second EMA stack for each sleeve with roughly
+half the spans and half the confirm-days (e.g. ETH 50/120/300 confirm-3 -> shadow 25/60/150 confirm-1),
+gated on `news_sentiment.py`'s existing `severity` field (already computed daily, previously unused
+for anything but display — no new data pipeline needed). On days classified `severity: high`
+(configurable via `--shadow-ema-severity-threshold`), it logs whether the fast stack would have
+confirmed entry/exit while the real one hadn't yet. These are new columns only
+(`eth_shadow_fast_ema_*`, `btc_shadow_fast_ema_*`, `shadow_ema_gate_active_today`) in
+`daily_checks_log.csv` — never wired into `off_target`/`weight_exec`/real position sizing, and not
+added to the Discord message. Verified the shadow stack genuinely does confirm faster on a synthetic
+sustained breakout, and doesn't produce false divergences when nothing is happening. Worth noting
+before reading too much into a "yes" or "no" from this later: a faster EMA reacts faster to *every*
+price move, not selectively to real trend continuation — it would also chase a news overreaction that
+partially reverses, which is exactly what the existing "IV disagree, historical avg next 5d: +2.64%"
+signal in these same posts describes. This needs real high-severity days to accumulate before there's
+anything to look at, and even then it's one more anecdote, not a validated result, until there's
+enough of them to say something with actual confidence.
+
 ## Frozen Research Branches
 
 Historical/frozen components may exist as branches or tags, including:
