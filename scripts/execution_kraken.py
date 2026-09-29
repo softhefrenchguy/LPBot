@@ -31,7 +31,7 @@ MIN_TRADE = 10.0
 # against the real ~EUR500 balance this is actually running on). Scaled down to the real account size
 # and made env-overridable so they can be raised later (e.g. once more capital is moved in) without
 # another code change + deploy.
-MAX_SINGLE_TRADE = float(os.getenv("MAX_SINGLE_TRADE_EUR", "200.0"))
+MAX_SINGLE_TRADE = float(os.getenv("MAX_SINGLE_TRADE_EUR", "450.0"))
 MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS_EUR", "50.0"))
 MIN_CASH_RESERVE_PCT = 0.10
 SLIPPAGE_WARN_PCT = 0.02
