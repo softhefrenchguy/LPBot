@@ -2094,23 +2094,37 @@ def _run() -> int:
     if days_live < 1:
         days_live = 1
 
+    # Stop conditions MUST be evaluated before any live order is placed, not after. This used to be
+    # computed below (after the live-execution call had already run), which meant a day that should
+    # have STOPped would still send that day's real order first and only discover the stop afterward.
+    if np.isfinite(rolling_30d_sharpe) and rolling_30d_sharpe < float(args.stop_rolling_sharpe):
+        stops.append("rolling_30d_sharpe_below_stop")
+    if np.isfinite(peak_dd) and peak_dd < float(args.stop_drawdown):
+        stops.append("drawdown_below_stop")
+    if np.isfinite(chop_bps_60d) and chop_bps_60d < float(args.review_chop_bps):
+        reviews.append("chop_bps_60d_below_review")
+
     live_execution_report: dict[str, object] = {}
     live_execution_error = ""
     live_execution_dry_run = True
     if bool(args.live):
-        try:
-            from execution_kraken import execute_strategy_signal
+        if stops:
+            live_execution_error = f"execution_skipped_stop_active:{','.join(stops)}"
+            reviews.append(live_execution_error)
+        else:
+            try:
+                from execution_kraken import execute_strategy_signal
 
-            live_execution_dry_run = os.getenv("LIVE_TRADING_ENABLED", "").strip().lower() != "true"
-            live_execution_report = execute_strategy_signal(
-                eth_target_weight=float(eth_execution_weight) if np.isfinite(eth_execution_weight) else 0.0,
-                btc_target_weight=float(btc_comb_w) if np.isfinite(btc_comb_w) else 0.0,
-                total_capital_eur=None,
-                dry_run=live_execution_dry_run,
-            )
-        except Exception as exc:
-            live_execution_error = f"{type(exc).__name__}: {exc}"
-            reviews.append(f"live_execution_failed:{str(exc)[:120]}")
+                live_execution_dry_run = os.getenv("LIVE_TRADING_ENABLED", "").strip().lower() != "true"
+                live_execution_report = execute_strategy_signal(
+                    eth_target_weight=float(eth_execution_weight) if np.isfinite(eth_execution_weight) else 0.0,
+                    btc_target_weight=float(btc_comb_w) if np.isfinite(btc_comb_w) else 0.0,
+                    total_capital_eur=None,
+                    dry_run=live_execution_dry_run,
+                )
+            except Exception as exc:
+                live_execution_error = f"{type(exc).__name__}: {exc}"
+                reviews.append(f"live_execution_failed:{str(exc)[:120]}")
 
     news_row = _latest_news_row(Path(args.news_log_csv))
     markets_lines = _latest_market_lines(Path(args.market_log_csv))
@@ -2143,13 +2157,6 @@ def _run() -> int:
         f"gate_active={shadow_gate_active} | ETH diverges={eth_shadow_diverges} (real={entry_threshold_met} shadow={eth_shadow_entry_threshold_met}) "
         f"| BTC diverges={btc_shadow_diverges} (real={btc_entry_threshold_met} shadow={btc_shadow_entry_threshold_met})"
     )
-
-    if np.isfinite(rolling_30d_sharpe) and rolling_30d_sharpe < float(args.stop_rolling_sharpe):
-        stops.append("rolling_30d_sharpe_below_stop")
-    if np.isfinite(peak_dd) and peak_dd < float(args.stop_drawdown):
-        stops.append("drawdown_below_stop")
-    if np.isfinite(chop_bps_60d) and chop_bps_60d < float(args.review_chop_bps):
-        reviews.append("chop_bps_60d_below_review")
 
     all_reasons = stops + flags + reviews
     any_flag = bool(len(all_reasons) > 0)
