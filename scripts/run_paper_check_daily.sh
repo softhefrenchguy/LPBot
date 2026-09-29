@@ -86,7 +86,11 @@ fi
 if [[ "$USE_DOCKER" == "1" ]] && command -v docker-compose >/dev/null 2>&1; then
   (
     cd "$REPO_ROOT"
-    docker-compose exec -T -e DISCORD_WEBHOOK_URL="$DISCORD_WEBHOOK_URL" lpbot python - \
+    docker-compose exec -T \
+      -e DISCORD_WEBHOOK_URL="$DISCORD_WEBHOOK_URL" \
+      -e LIVE_TRADING_ENABLED="${LIVE_TRADING_ENABLED:-}" \
+      -e LIVE_TRADING_CONFIRM="${LIVE_TRADING_CONFIRM:-}" \
+      lpbot python - \
       --price-csv data/ETHUSDC_5m.csv \
       --funding-csv "$FUNDING_CSV" \
       --regime-csv "$REGIME_CSV" \
