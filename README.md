@@ -674,6 +674,40 @@ where expected; the default `k=0.0` is byte-identical to not having this code at
 the idea itself doesn't work, not that it was built wrong. Kept in the codebase, off by default, as a
 documented negative finding, same convention as `--reversal-cooldown-days` and `--resize-deadband`.
 
+### 11. Real news severity/direction cross-referenced against realized returns: no signal
+
+Section 10 tested a price-side proxy for "big news hit" because no historical severity labels exist
+for 2019-2024. By September 2026 the live `news_sentiment.py` cron had been running long enough
+(since 2026-04-29) to check the real thing directly: does the Claude-labeled `severity`
+(low/medium/high) or `direction` (bullish/bearish/mixed) that actually gets posted to Discord each
+day have any measurable relationship to what BTC/ETH did afterward?
+
+Pulled the full `artifacts/news/news_log.csv` history off the production server (153 unique days,
+2026-04-29 to 2026-09-28; deduplicated to one row per day the same way `_latest_news_row()` does —
+last row wins) and joined it against realized daily BTC/ETH closes for the same window. Checked four
+things:
+
+- **Severity vs. forward volatility** — if severity meant anything, "high" days should precede bigger
+  moves than "low" days. They don't: mean forward-1-day |return| is 1.54% (BTC) / 2.05% (ETH) on
+  "high" days vs. 1.90% / 2.48% on "low" days — backwards from what the signal would need to be
+  useful. Spearman correlation between severity level and forward |return|: 0.018 (BTC), 0.084 (ETH),
+  neither distinguishable from zero (p=0.83, p=0.30).
+- **Direction vs. next-day sign** — "bullish"/"bearish" labels predicted the next day's direction at a
+  50.0% (BTC) / 52.6% (ETH) hit rate, indistinguishable from the baseline up-day rate (49.7% / 53.6%).
+  Mean next-day return was directionally sensible (+0.29% after "bullish" vs. -0.10% after "bearish"
+  for BTC) but the hit-rate test is the one to trust at n=32-46 per bucket — a mean gap that size is
+  easily one or two outlier days, not demonstrated skill.
+- **`major_event` flag (binary) vs. forward move** — same pattern: non-event days show slightly
+  *larger* forward moves than event days, not smaller.
+
+**Conclusion: no measurable short-term predictive power in the real labels**, consistent with (and
+independent of) section 10's rejection of the price-proxy version. Two honest caveats: the sample is
+thin (5 months, "low" severity is only 15 days) and it all sits inside one continuous macro regime (a
+near-nonstop Iran/Strait-of-Hormuz conflict since April), so this is "eventful vs. slightly-less-eventful"
+rather than a real calm-vs-crisis comparison. Not the final word, but a second independent result
+pointing the same direction as section 10. No code changes from this finding — the live shadow signal
+from section 9 stays diagnostic-only, and this is now documented context for why it should stay that way.
+
 ## Frozen Research Branches
 
 Historical/frozen components may exist as branches or tags, including:
