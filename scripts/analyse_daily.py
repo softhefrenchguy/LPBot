@@ -142,10 +142,12 @@ def _history_line(row: pd.Series) -> str:
     vol_regime = _safe_str(_first(row, ["vol_regime"]), "n/a")
     excess = _first(row, ["portfolio_excess_vs_basket", "excess"])
     news_direction = _safe_str(_first(row, ["news_direction"]), "n/a")
+    eth_pos = "IN" if _fmt_bool(_first(row, ["off_position"])) == "YES" else "FLAT"
+    btc_pos = "IN" if _fmt_bool(_first(row, ["btc_position"])) == "YES" else "FLAT"
     return (
-        f"{date} | ETH {_fmt_price(eth_price)} ({_fmt_pct(eth_24h, signed=True)}) | "
+        f"{date} | ETH {_fmt_price(eth_price)} ({_fmt_pct(eth_24h, signed=True)}) [{eth_pos}] | "
         f"Regime: {regime} | DD/20d: {_fmt_pct(dd_20d)} | "
-        f"EMA50: {_fmt_num(ema50, 0)} | BTC EMA15: {_fmt_num(btc_ema15, 0)} | "
+        f"EMA50: {_fmt_num(ema50, 0)} | BTC EMA15: {_fmt_num(btc_ema15, 0)} [{btc_pos}] | "
         f"Vol: {vol_regime} | Excess: {_fmt_pct(excess, 2, signed=True)} | "
         f"News: {news_direction}"
     )
@@ -155,9 +157,22 @@ def _build_history_block(df_history: pd.DataFrame) -> str:
     return "\n".join(_history_line(row) for _, row in df_history.iterrows())
 
 
+def _position_state(today: pd.Series, pos_col: str, entry_col: str, days_col: str, ret_col: str) -> dict[str, Any]:
+    is_open = _fmt_bool(_first(today, [pos_col])) == "YES"
+    return {
+        "is_open": is_open,
+        "entry_date": _safe_str(_first(today, [entry_col])),
+        "days_held": _safe_num(_first(today, [days_col])),
+        "hold_return": _safe_num(_first(today, [ret_col])),
+    }
+
+
 def _stack_inputs(today: pd.Series) -> dict[str, dict[str, Any]]:
     """Per-sleeve inputs for the entry rule: EMA stack fast>mid>slow aligned for `confirm_days` in a row
-    (ETH 50/120/300 for 3 days, BTC 15/40/120 for 5 days). The regime label is NOT an entry condition."""
+    (ETH 50/120/300 for 3 days, BTC 15/40/120 for 5 days). The regime label is NOT an entry condition.
+    Also carries whether a position is currently OPEN (off_position/btc_position) -- without this, both
+    the model and the old fixed-template footer described entry conditions for trades that were already
+    live, for as long as the position stayed open."""
 
     def emas(*name_lists: list[str]) -> tuple[float, float, float]:
         return tuple(_safe_num(_first(today, names)) for names in name_lists)  # type: ignore[return-value]
@@ -168,14 +183,18 @@ def _stack_inputs(today: pd.Series) -> dict[str, dict[str, Any]]:
             "emas": emas(["ema50", "eth_ema50", "ema21"], ["ema120", "eth_ema120", "ema55"], ["ema300", "eth_ema300", "ema144"]),
             "spans": (50, 120, 300),
             "confirm_days": 3,
+            "exit_confirm_days": 3,
             "aligned_days": _safe_num(_first(today, ["stack_aligned_days", "eth_stack_aligned_days"])),
+            "position": _position_state(today, "off_position", "off_entry_ts", "off_days_held", "off_hold_return"),
         },
         "BTC": {
             "price": _safe_num(_first(today, ["btc_price"])),
             "emas": emas(["btc_ema15", "btc_ema21"], ["btc_ema40", "btc_ema55"], ["btc_ema120", "btc_ema144"]),
             "spans": (15, 40, 120),
             "confirm_days": 5,
+            "exit_confirm_days": 5,
             "aligned_days": _safe_num(_first(today, ["btc_stack_aligned_days"])),
+            "position": _position_state(today, "btc_position", "btc_off_entry_ts", "btc_off_days_held", "btc_off_hold_return"),
         },
     }
 
@@ -222,6 +241,23 @@ def _sleeve_trigger_line(name: str, inp: dict[str, Any]) -> str:
     spans, confirm = inp["spans"], inp["confirm_days"]
     price = inp["price"]
     tag = f"{name} ({spans[0]}>{spans[1]}>{spans[2]})"
+
+    pos = inp.get("position", {})
+    if pos.get("is_open"):
+        days_held = pos.get("days_held", float("nan"))
+        ret = pos.get("hold_return", float("nan"))
+        entry = pos.get("entry_date") or "unknown date"
+        held = f"{int(days_held)}d" if np.isfinite(days_held) else "unknown duration"
+        pct = _fmt_pct(ret, 2, signed=True) if np.isfinite(ret) else "n/a"
+        exit_confirm = inp.get("exit_confirm_days", confirm)
+        blockers = _stack_blockers(inp["emas"], spans) if all(np.isfinite(x) for x in inp["emas"]) else []
+        exit_state = (
+            f"stack still aligned, exit needs {exit_confirm} consecutive misaligned days (or an immediate BEAR-regime exit)."
+            if not blockers
+            else f"stack already breaking ({'; '.join(blockers)}) - exit confirms after {exit_confirm} consecutive day(s) of this."
+        )
+        return f"{tag}: ALREADY IN POSITION, entered {entry} ({held} held, {pct}). {exit_state}"
+
     if not all(np.isfinite(x) for x in inp["emas"]):
         return f"{tag}: n/a (EMA data missing)"
     blockers = _stack_blockers(inp["emas"], spans)
@@ -250,6 +286,16 @@ def _entry_trigger_footer(today: pd.Series) -> str:
     inputs = _stack_inputs(today)
     lines = [_sleeve_trigger_line(name, inputs[name]) for name in ("ETH", "BTC")]
     return "**Next entry trigger** (projection assumes a flat price):\n" + "\n".join(lines)
+
+
+def _position_line(name: str, pos: dict[str, Any]) -> str:
+    if not pos.get("is_open"):
+        return f"{name} position: FLAT"
+    days_held = pos.get("days_held", float("nan"))
+    ret = pos.get("hold_return", float("nan"))
+    held = f"{int(days_held)}d" if np.isfinite(days_held) else "n/a"
+    pct = _fmt_pct(ret, 2, signed=True) if np.isfinite(ret) else "n/a"
+    return f"{name} position: OPEN since {pos.get('entry_date') or 'n/a'} ({held} held, {pct})"
 
 
 def _build_today_block(today: pd.Series, news_latest: dict[str, Any], dvol_latest: dict[str, Any], trades: pd.DataFrame) -> str:
@@ -291,6 +337,7 @@ def _build_today_block(today: pd.Series, news_latest: dict[str, Any], dvol_lates
         f"Stack aligned: {_fmt_bool(_first(today, ['eth_stack_aligned', 'stack_aligned']))}",
         f"Days since break: {_fmt_num(_first(today, ['days_since_break', 'off_days_since_break']), 0)}",
         _stack_status_line("ETH", stack_inputs["ETH"]),
+        _position_line("ETH", stack_inputs["ETH"]["position"]),
         "",
         f"BTC: {_fmt_price(_first(today, ['btc_price']))}",
         f"BTC Regime: {_safe_str(_first(today, ['btc_regime']), 'n/a')}",
@@ -299,6 +346,7 @@ def _build_today_block(today: pd.Series, news_latest: dict[str, Any], dvol_lates
         f"{_fmt_num(_first(today, ['btc_ema40', 'btc_ema55']), 0)} / "
         f"{_fmt_num(_first(today, ['btc_ema120', 'btc_ema144']), 0)}",
         _stack_status_line("BTC", stack_inputs["BTC"]),
+        _position_line("BTC", stack_inputs["BTC"]["position"]),
         f"Funding z: {_fmt_num(_first(today, ['btc_funding_z']), 3)}",
         "",
         f"Vol regime: {_safe_str(_first(today, ['vol_regime']), 'n/a')} ({_fmt_num(_first(today, ['vol_percentile']), 0)}th pct)",
@@ -346,10 +394,16 @@ Strategy context:
 - PAXG gold reserve in BEAR regime
 - Validated Sharpe 1.121, CAGR 25.59%
 - Paper trading since 2026-03-21
-- One completed trade: -10.21% (Apr-May 2026)
-- Currently waiting for next entry signal
+
+Each sleeve (ETH, BTC) is either OPEN or FLAT right now -- this changes over time, so never assume
+either state. TODAY IN DETAIL has an explicit "position:" line for each sleeve; the 14-day history
+shows [IN]/[FLAT] per day. Always check these before writing anything about entries: if a sleeve
+shows OPEN, you are already holding it (do not describe waiting for it to trigger; the open question
+is what would make you exit), and if a sleeve has been OPEN for multiple days in the history, say so
+explicitly rather than defaulting to "no entry yet" language.
 
 Your analysis must:
+- State plainly, near the top, whether each sleeve is currently OPEN or FLAT
 - Identify trends visible across the rolling history, not just today
 - Note what is changing vs prior days
 - Flag any signals approaching thresholds

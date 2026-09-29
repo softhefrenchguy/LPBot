@@ -545,9 +545,10 @@ just a bigger backtest number.
 ### 8. Review of the live Discord analyses (Sep 2026): partial-candle follow-up and analysis fixes
 
 Two weeks of real "LPBot Analysis" Discord posts (Sep 7-21) were checked against the code. The bot was
-flat throughout, so none of the section-5 live changes (BTC exit days, gross cap, vol-scaled sizing)
-were observable in them, and they can't confirm which code version the server runs (see
-`docs/HETZNER_RUNBOOK.md` for how to check). They did surface three real problems:
+apparently flat throughout, so none of the section-5 live changes (BTC exit days, gross cap, vol-scaled
+sizing) were observable in them, and they can't confirm which code version the server runs (see
+`docs/HETZNER_RUNBOOK.md` for how to check). This surfaced three real problems, below — but "apparently
+flat" turned out to be wrong in a way none of the three caught; see item 4.
 
 - **Partial-candle fix was incomplete (ETH).** ETH's EMAs, stack alignment, 20d drawdown and the
   mean-reversion z-score are built from `data/ETHUSDC_5m.csv` by taking the last row of each day, so
@@ -571,6 +572,22 @@ were observable in them, and they can't confirm which code version the server ru
   11, 15, 18, 20, 21) lost the end of the answer, including the footer. Raised to 800, stop reason is
   logged, and the Discord message is composed so that if anything must be shortened it is the analysis,
   never the footer.
+- **The model had no way to know a position was open — the real bug behind the user's report.** A
+  second Discord channel posts `paper_trade_checklist.py`'s own raw state directly (not through
+  `analyse_daily.py`); comparing it against the "LPBot Analysis" posts for the same dates (Sep 19-21)
+  showed BTC had an actual open position since 2026-08-31, up +3.3% at the time, while the Claude
+  commentary for those exact days kept saying "No entry imminent... EMA15 needs to cross EMA40." The
+  fix in the item above (naming the right EMA pair) was real but incomplete — it never addressed *this*.
+  Two causes stacked: `_build_today_block()` never read `off_position`/`btc_position`/`off_entry_ts`/
+  `off_hold_return` (or their BTC equivalents) at all, so the model had no ground truth on open
+  positions; and the system prompt separately hardcoded "Currently waiting for next entry signal" as
+  permanent strategy context, asserted unconditionally on every single invocation regardless of actual
+  state. Both are fixed: the position columns are now read into `_stack_inputs()` and shown explicitly
+  in the data block, the 14-day history and the footer (which says "ALREADY IN POSITION, entered
+  DATE (Nd held, return%)" and gives the *exit* condition instead of a meaningless entry projection);
+  the hardcoded prompt line is gone, replaced with an instruction to check the position state before
+  writing anything about entries. Verified against the real Sep 29 numbers (BTC open since 2026-08-31,
+  29d held, +6.22%): the footer and data block now reproduce that correctly.
 
 ## Frozen Research Branches
 
