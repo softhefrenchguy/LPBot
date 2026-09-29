@@ -634,6 +634,46 @@ signal in these same posts describes. This needs real high-severity days to accu
 anything to look at, and even then it's one more anecdote, not a validated result, until there's
 enough of them to say something with actual confidence.
 
+### 10. News-proxy fast EMA, backtested: rejected
+
+The live shadow signal in section 9 can only observe going forward, one at a time, since it needs
+real high-severity news days to occur. A backtestable version was built too, substituting an
+objective price-side proxy for "big news hit" (no historical news-severity data exists for 2019-2024):
+`--news-proxy-big-move-k` in `backtest_eth_btc_portfolio.py` flags a day as an outlier when
+`|return| > K * (rolling 20d vol as of the PRIOR day)`, and for `--news-proxy-window-days` afterward
+(default 3), entry/exit switch to a roughly-halved-speed EMA stack. This tests a related but genuinely
+different question than section 9's live shadow (react faster after a big move already happened, vs.
+react faster because news was classified as severe) — flagged clearly as a substitution, not a
+like-for-like test of the same idea.
+
+Tested at K=1.5/2.0/2.5/3.0 against the full corrected pipeline, full-period and walk-forward, plus
+the untouched 2025-2026 window. **Rejected at every threshold tried:**
+
+| K | Sharpe (2019-2024) | MaxDD | Walk-forward OOS avg | Entries |
+|---|---|---|---|---|
+| 0.0 (off, current) | 1.121 | -21.0% | 0.490 | ~26 |
+| 1.5 | 0.860 | **-35.0%** | 0.143 | ~76 |
+| 2.0 | 0.937 | -30.3% | 0.345 | ~63 |
+| 2.5 | 1.045 | -25.9% | 0.461 | ~48 |
+| 3.0 | 1.136 | -22.1% | 0.613 | ~35 |
+
+As the threshold tightens toward only the most extreme days, results approach — but never beat —
+doing nothing. Every setting roughly doubles-to-triples trade count and makes the worst drawdown
+meaningfully worse. Confirmed this is genuine whipsaw, not noise: at K=2.0 the proxy correctly fires
+on 178 real outlier days and keeps the fast stack active for 22% of the whole period (477/2191 days),
+fully explaining the extra churn. On the untouched 2025-2026 window the results are just noisy — one
+value looks marginally better than doing nothing, every other value is worse, and that "better" value
+is the exact one that produced the worst drawdown on the tuned period, the same instability pattern
+section 7's deadband test showed at its extremes.
+
+**Conclusion: the original intuition doesn't hold up against real data.** A faster EMA reacts faster
+to every price move, not selectively to genuine trend continuation, and the news overreactions it was
+meant to catch are disproportionately the ones that partially reverse — costing more through whipsaw
+than it gains through speed. Verified the mechanism itself is implemented correctly (fires exactly
+where expected; the default `k=0.0` is byte-identical to not having this code at all) before concluding
+the idea itself doesn't work, not that it was built wrong. Kept in the codebase, off by default, as a
+documented negative finding, same convention as `--reversal-cooldown-days` and `--resize-deadband`.
+
 ## Frozen Research Branches
 
 Historical/frozen components may exist as branches or tags, including:

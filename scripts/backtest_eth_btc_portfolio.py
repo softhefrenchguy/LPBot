@@ -542,6 +542,9 @@ def run_sleeve(
     price_data: pd.DataFrame | None = None,
     reversal_cooldown_days: int = 0,
     reversal_cooldown_threshold_days: int = 10,
+    news_proxy_big_move_k: float = 0.0,
+    news_proxy_window_days: int = 3,
+    news_proxy_ema_divisor: int = 2,
 ) -> pd.DataFrame:
     d = price_data.copy() if price_data is not None else _download_binance_daily(symbol=symbol, start=start, end=end)
     if d.empty:
@@ -580,6 +583,38 @@ def run_sleeve(
     else:
         entry = entry_base
     exit_ = ((~d["stack_aligned"]).rolling(conf, min_periods=conf).min() == 1).fillna(False)
+
+    # News-proxy fast EMA: no historical, point-in-time news-severity data exists for this backtest
+    # period, so "big news hit" is proxied by an outlier price move (today's |return| vs. a rolling
+    # vol baseline computed from STRICTLY PRIOR days, so today's own move can't inflate the baseline
+    # it's being compared against). If triggered, a faster (roughly halved) EMA stack drives entry/exit
+    # for the following `news_proxy_window_days` days. Shifted by one day before use, matching the
+    # lag-1 causal convention used everywhere else in this file. news_proxy_big_move_k=0.0 (default)
+    # disables this entirely -- entry/exit are then byte-identical to the non-proxy path.
+    d["news_proxy_big_move"] = False
+    d["news_proxy_window_active"] = False
+    if float(news_proxy_big_move_k) > 0.0:
+        daily_ret = d["close"].pct_change()
+        rolling_vol_prior = daily_ret.rolling(20, min_periods=20).std(ddof=0).shift(1)
+        big_move = (daily_ret.abs() > float(news_proxy_big_move_k) * rolling_vol_prior).fillna(False)
+        in_window = (
+            big_move.shift(1).rolling(max(1, int(news_proxy_window_days)), min_periods=1).max() == 1
+        ).fillna(False)
+        d["news_proxy_big_move"] = big_move
+        d["news_proxy_window_active"] = in_window
+
+        divisor = max(1, int(news_proxy_ema_divisor))
+        fe1, fe2, fe3 = (max(2, e1 // divisor), max(3, e2 // divisor), max(4, e3 // divisor))
+        fast_conf = max(1, conf // divisor)
+        f21 = d["close"].ewm(span=fe1, adjust=False).mean()
+        f55 = d["close"].ewm(span=fe2, adjust=False).mean()
+        f144 = d["close"].ewm(span=fe3, adjust=False).mean()
+        fast_stack = (f21 > f55) & (f55 > f144)
+        fast_entry = (fast_stack.rolling(fast_conf, min_periods=fast_conf).min() == 1).fillna(False)
+        fast_exit = ((~fast_stack).rolling(fast_conf, min_periods=fast_conf).min() == 1).fillna(False)
+
+        entry = entry.where(~in_window, fast_entry)
+        exit_ = exit_.where(~in_window, fast_exit)
 
     rv = d["close"].pct_change().rolling(20, min_periods=20).std(ddof=0) * np.sqrt(252.0)
     d["vol_scalar"] = (0.50 / rv.replace(0.0, np.nan)).replace([np.inf, -np.inf], np.nan).clip(lower=0.25, upper=1.0).fillna(0.25)
@@ -729,6 +764,9 @@ def main() -> int:
     ap.add_argument("--reversal-cooldown-days", type=int, default=0, help="After a trade exits having been held less than --reversal-cooldown-threshold-days, block re-entry on that sleeve for this many days. 0 (default) disables the cooldown entirely.")
     ap.add_argument("--reversal-cooldown-threshold-days", type=int, default=10, help="A trade held fewer than this many days is classified as a quick reversal and triggers the cooldown on exit.")
     ap.add_argument("--resize-deadband", type=float, default=0.0, help="Only update the executed alloc_eth/alloc_btc when the target moves more than this much (absolute, e.g. 0.05 = 5pp of gross_cap) from the last executed value; real entries/exits always execute immediately regardless. 0.0 (default) disables the deadband entirely.")
+    ap.add_argument("--news-proxy-big-move-k", type=float, default=0.0, help="No historical news-severity data exists, so 'big news' is proxied by an outlier day: |return| > K * prior rolling vol. If triggered, entry/exit switch to a faster EMA stack for --news-proxy-window-days. 0.0 (default) disables this entirely.")
+    ap.add_argument("--news-proxy-window-days", type=int, default=3)
+    ap.add_argument("--news-proxy-ema-divisor", type=int, default=2, help="How much faster the proxy EMA stack is (spans and confirm-days divided by this, floor-clamped).")
     ap.add_argument("--vol-filter", action="store_true")
     ap.add_argument("--transition-momentum", action="store_true")
     ap.add_argument("--cross-confirm", choices=["off", "strict", "loose", "one-way"], default="off")
@@ -791,6 +829,9 @@ def main() -> int:
         price_data=eth_price_data,
         reversal_cooldown_days=int(args.reversal_cooldown_days),
         reversal_cooldown_threshold_days=int(args.reversal_cooldown_threshold_days),
+        news_proxy_big_move_k=float(args.news_proxy_big_move_k),
+        news_proxy_window_days=int(args.news_proxy_window_days),
+        news_proxy_ema_divisor=int(args.news_proxy_ema_divisor),
     )
     btc = run_sleeve(
         symbol=args.btc_symbol,
@@ -812,6 +853,9 @@ def main() -> int:
         price_data=btc_price_data,
         reversal_cooldown_days=int(args.reversal_cooldown_days),
         reversal_cooldown_threshold_days=int(args.reversal_cooldown_threshold_days),
+        news_proxy_big_move_k=float(args.news_proxy_big_move_k),
+        news_proxy_window_days=int(args.news_proxy_window_days),
+        news_proxy_ema_divisor=int(args.news_proxy_ema_divisor),
     )
 
     keep = [
@@ -838,6 +882,8 @@ def main() -> int:
         "cross_trades_removed",
         "cross_trades_delayed",
         "reversal_cooldown_blocks",
+        "news_proxy_big_move",
+        "news_proxy_window_active",
     ]
     e = eth[keep].copy().rename(
         columns={
@@ -862,6 +908,8 @@ def main() -> int:
             "cross_trades_removed": "eth_cross_trades_removed",
             "cross_trades_delayed": "eth_cross_trades_delayed",
             "reversal_cooldown_blocks": "eth_reversal_cooldown_blocks",
+            "news_proxy_big_move": "eth_news_proxy_big_move",
+            "news_proxy_window_active": "eth_news_proxy_window_active",
         }
     )
     b = btc[keep].copy().rename(
@@ -887,6 +935,8 @@ def main() -> int:
             "cross_trades_removed": "btc_cross_trades_removed",
             "cross_trades_delayed": "btc_cross_trades_delayed",
             "reversal_cooldown_blocks": "btc_reversal_cooldown_blocks",
+            "news_proxy_big_move": "btc_news_proxy_big_move",
+            "news_proxy_window_active": "btc_news_proxy_window_active",
         }
     )
 
