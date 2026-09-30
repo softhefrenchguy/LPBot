@@ -2113,6 +2113,23 @@ def _run() -> int:
             reviews.append(live_execution_error)
         else:
             try:
+                # This script is normally invoked as `python - < scripts/paper_trade_checklist.py`
+                # (piped via stdin), which puts only the cwd on sys.path -- execution_kraken.py
+                # lives one level down in scripts/, so a bare import fails with ModuleNotFoundError
+                # in that invocation style even though it works fine when this file is run directly.
+                # __file__ is NOT undefined under `python -` as might be expected -- it's set to the
+                # literal string '<stdin>', which resolves to a bogus path, not scripts/. Default to
+                # cwd/scripts (correct for the stdin case) and only trust __file__ if it names a real
+                # file on disk (the direct-execution case).
+                _execution_kraken_dir = os.path.join(os.getcwd(), "scripts")
+                try:
+                    _self_path = Path(__file__).resolve()
+                    if _self_path.is_file():
+                        _execution_kraken_dir = str(_self_path.parent)
+                except (NameError, OSError):
+                    pass
+                if _execution_kraken_dir not in sys.path:
+                    sys.path.insert(0, _execution_kraken_dir)
                 from execution_kraken import execute_strategy_signal
 
                 live_execution_dry_run = os.getenv("LIVE_TRADING_ENABLED", "").strip().lower() != "true"
