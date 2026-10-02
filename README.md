@@ -629,10 +629,15 @@ added to the Discord message. Verified the shadow stack genuinely does confirm f
 sustained breakout, and doesn't produce false divergences when nothing is happening. Worth noting
 before reading too much into a "yes" or "no" from this later: a faster EMA reacts faster to *every*
 price move, not selectively to real trend continuation — it would also chase a news overreaction that
-partially reverses, which is exactly what the existing "IV disagree, historical avg next 5d: +2.64%"
-signal in these same posts describes. This needs real high-severity days to accumulate before there's
-anything to look at, and even then it's one more anecdote, not a validated result, until there's
-enough of them to say something with actual confidence.
+partially reverses. This needs real high-severity days to accumulate before there's anything to look
+at, and even then it's one more anecdote, not a validated result, until there's enough of them to say
+something with actual confidence.
+
+(This section originally used the "IV disagree, historical avg next 5d: +2.64%" line from the same
+Discord posts as an illustrative analogy for this kind of overreaction-then-reversal pattern. Turned
+out that figure was a hardcoded string in `analyse_daily.py` from a one-off manual run early on, never
+updated, and wrong by the time there was enough real data to check — see section 12 below for the
+real numbers and the fix. Removed the analogy here rather than leave a now-debunked example standing.)
 
 ### 10. News-proxy fast EMA, backtested: rejected
 
@@ -707,6 +712,65 @@ near-nonstop Iran/Strait-of-Hormuz conflict since April), so this is "eventful v
 rather than a real calm-vs-crisis comparison. Not the final word, but a second independent result
 pointing the same direction as section 10. No code changes from this finding — the live shadow signal
 from section 9 stays diagnostic-only, and this is now documented context for why it should stay that way.
+
+### 12. A hardcoded, stale statistic found in the live narrative post — fixed
+
+`analyse_daily.py`'s narrative commentary included a fixed line whenever options-implied and
+realized volatility regimes disagreed: *"IV DISAGREE: Options=X, RV=Y; historical avg next 5d:
++2.64%"*. That number never changed, across every post, regardless of date — a tell that it was a
+hardcoded string, not a live computation. Confirmed: it was a literal string in the code, almost
+certainly pasted in from a one-off manual run of `scripts/options/analyse_vol_surface.py` early on
+with far less data, then never revisited.
+
+Ran that analysis script for real against the actual 116 days accumulated in
+`artifacts/options/dvol_log.csv` since 2026-06-09. Two things came out of it:
+
+- **The specific number was wrong, and the direction of the claim was backwards.** DISAGREE days
+  averaged +1.39% over the next 5 days; AGREE days averaged *higher*, +3.46% — the opposite of what
+  a fixed "disagreement precedes a bigger move" line implied.
+- **There is a real, if preliminary, signal in the underlying data that was never surfaced anywhere**:
+  classifying regime by options-implied vol correctly calls the next-5-day direction 69.2% of the
+  time, vs. 60.3% for realized vol — the script's own output recommends switching to options IV as
+  the better signal. The script itself flags the sample as "PRELIMINARY, revisit after 90 days,"
+  and some sub-group breakdowns are as thin as 2 days, so this is a lead worth tracking, not a
+  conclusion to act on yet.
+
+Importantly: checked first, before fixing anything, whether this stale number ever fed into a real
+trading decision. It didn't — `dvol_row` is read once in `paper_trade_checklist.py` purely to build
+(now-removed, see section 13) Discord/narrative display text; it was never an input to any ETH/BTC
+weight or sizing calculation, paper or real. So this was a reporting-only error, not a trading one.
+
+**Fix**: removed the fixed "+2.64%" claim from `analyse_daily.py` entirely, rather than replace it
+with a different hardcoded number that would just go stale the same way later. The live, accurate-
+daily fields (`IV regime`, `RV regime`, `IV/RV agreement`) stay in the narrative; the specific
+historical-average figure, which can't be kept honestly current inside a per-day narrative builder
+without wiring in a real recomputation, is gone until/unless that gets built properly.
+
+### 13. Daily Discord post trimmed from ~14 sections to 4, plus real live P&L
+
+The daily checklist's Discord post had grown organically over the session to roughly 14 fields
+(Market, the 10-asset market tracker, Strategy State, Offensive/Defensive/BTC Signal internals, Gold
+Sleeve, Mean-Reversion Overlay, Options Vol, Performance, News, Health, plus conditional active-trade
+blocks) — useful while debugging this session, far more than a daily glance needs. Replaced with 4:
+Positions (BTC/ETH/Gold, paper + live return), Live Account (real total + return since going live),
+Status (unchanged — PASS/REVIEW/STOP + flags, never trimmed), News (truncated, not removed). All the
+removed detail still lands in `artifacts/paper_trade/daily_check_*.csv` for anyone who wants it; this
+only changes what gets pushed to Discord every day.
+
+Added two functions to `execution_kraken.py` to make a real "live P&L" line possible instead of just
+order mechanics: `live_return_since_start()` and `compute_live_asset_pnl()`, both reconstructing real
+returns from the actual execution/pnl logs rather than the paper-tracked numbers. Wiring these up also
+fixed a second, unrelated latent bug: `_log_daily_pnl()` (which the daily-loss guard already read from)
+had never actually been called anywhere, so `MAX_DAILY_LOSS` had been a silent no-op since the guard
+was written. Now populated after every real execution.
+
+Caught a real unit-conversion bug in these new functions before deploying, via a test that intercepts
+the Discord HTTP call rather than hitting the real webhook: both initially returned percent-points
+(`5.4` meaning 5.4%) while `_fmt_pct` — used for every other return field in this codebase — expects a
+fraction (`0.054`) and multiplies by 100 itself. Would have silently shown "540%" instead of "5.4%" in
+production. Fixed to return fractions, consistent with every other return field here, and verified
+across 6 scenarios (normal state, dry-run with a visible error, no live-mode requested, NaN live
+total, long news truncation, NaN per-asset P&L) before deploying.
 
 ## Frozen Research Branches
 

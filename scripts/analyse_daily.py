@@ -360,8 +360,16 @@ def _build_today_block(today: pd.Series, news_latest: dict[str, Any], dvol_lates
         f"RV regime: {dvol_rv_regime}",
         f"IV/RV agreement: {dvol_agreement}",
         (
-            f"IV DISAGREE: Options={dvol_regime}, RV={dvol_rv_regime}; "
-            "historical avg next 5d: +2.64%"
+            # Used to append a fixed "historical avg next 5d: +2.64%" here -- a number from a
+            # one-off manual run of scripts/options/analyse_vol_surface.py early on, with far less
+            # data, that then never got updated and was silently wrong for the rest of the time
+            # this ran. The real figure moves as more data accumulates (checked directly against
+            # 116 real days: DISAGREE-day avg next-5d is actually +1.39%, and AGREE days are
+            # *higher* at +3.46%, the opposite of what a fixed "disagreement precedes bigger moves"
+            # claim implied) and the sample is still explicitly flagged PRELIMINARY by that script's
+            # own output. Report the disagreement itself -- which is live and accurate daily -- and
+            # not a specific historical-average number that can't be kept honestly up to date here.
+            f"IV DISAGREE: Options={dvol_regime}, RV={dvol_rv_regime}"
             if dvol_disagree
             else "IV DISAGREE: NO"
         ),
