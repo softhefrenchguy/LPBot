@@ -694,241 +694,70 @@ def _trailing_false_days_from_log(log_path: Path, paper_start_ts: pd.Timestamp, 
 
 
 def _send_discord_summary(webhook_url: str, summary: dict[str, object], timeout_sec: float = 10.0) -> tuple[bool, str]:
+    """Minimal daily summary: positions, live P&L, status, news. The full per-signal detail
+    (raw EMA values, conviction scores, options vol, mean-reversion internals, the 10-asset market
+    tracker, etc.) stayed in the exhaustive version this replaced for ~200 days of production use,
+    but was more than a casual daily check needs -- all of it still lands in the CSV logs
+    (artifacts/paper_trade/daily_check_*.csv) for anyone who wants to dig in. This trims the
+    *daily* post down to what's actually actionable, without ever hiding a real error or flag --
+    status/flags and any live-execution error always show, by design."""
     status = str(summary.get("status", "REVIEW"))
     color_map = {"PASS": 0x00FF00, "REVIEW": 0xFFA500, "STOP": 0xFF0000}
     color = int(color_map.get(status, 0x808080))
-    regime = str(summary.get("regime", "NA"))
-    regime_map = {"BULL": "BULL", "CHOP": "CHOP", "BEAR": "BEAR"}
-    regime_label = regime_map.get(regime, "NA")
-    paper_start = str(summary.get("paper_start_date", "NA"))
-    days_live = summary.get("days_live", "NA")
-    off_w_raw = _safe_num(summary.get("off_weight_raw", summary.get("off_weight", np.nan)))
-    off_w_scaled = _safe_num(summary.get("off_weight_scaled", np.nan))
-    def_w_raw = _safe_num(summary.get("def_weight_raw", summary.get("def_weight", np.nan)))
-    def_w_scaled = _safe_num(summary.get("def_weight_scaled", np.nan))
 
-    market_lines = [
-        f"ETH: ${_fmt_num(_safe_num(summary.get('eth_price', np.nan)), 0)} ({_fmt_pct(_safe_num(summary.get('eth_24h_pct', np.nan)), 1)})",
-        f"Regime: {regime_label} (streak {summary.get('regime_days', 'NA')}d)",
-        f"DD/20d: {_fmt_pct(_safe_num(summary.get('dd_20d', np.nan)), 1)}",
+    def _position_line(label: str, active: bool, entry_date: object, days_held: object, paper_ret: float, live_ret: float | None = None) -> str:
+        if not active:
+            return f"{label}: FLAT" + (", waiting for entry" if label != "Gold" else "")
+        line = f"{label}: IN since {entry_date}, {days_held}d held, paper {_fmt_pct(_safe_num(paper_ret), 2)}"
+        if live_ret is not None:
+            line += f" | live {_fmt_pct(_safe_num(live_ret), 2)}" if np.isfinite(_safe_num(live_ret)) else " | live n/a"
+        return line
+
+    position_lines = [
+        _position_line(
+            "BTC", bool(summary.get("btc_position", False)), summary.get("btc_entry_date", "NA"),
+            summary.get("btc_days_held", "NA"), summary.get("btc_trade_ret", np.nan),
+            summary.get("live_btc_unrealized_pct", np.nan) if bool(summary.get("live_mode_requested", False)) else None,
+        ),
+        _position_line(
+            "ETH", bool(summary.get("off_position", False)), summary.get("off_entry_date", "NA"),
+            summary.get("off_days_held", "NA"), summary.get("off_trade_ret", np.nan),
+            summary.get("live_eth_unrealized_pct", np.nan) if bool(summary.get("live_mode_requested", False)) else None,
+        ),
+        _position_line(
+            "Gold", bool(summary.get("gold_position_active", False)), summary.get("gold_entry_date", "NA"),
+            summary.get("gold_days_held", "NA"), summary.get("gold_return_since_entry", np.nan),
+        ),
     ]
-    markets_lines = summary.get("markets_lines", [])
-    if not isinstance(markets_lines, list):
-        markets_lines = []
-    if not markets_lines:
-        markets_lines = ["No market tracker data"]
-    state_lines = [
-        f"Offensive: {'LONG' if bool(summary.get('off_position', False)) else 'FLAT'}",
-        f"Defensive: {'ACTIVE' if bool(summary.get('def_position', False)) else 'FLAT'}",
-        f"Base ETH weight: {_fmt_pct(_safe_num(summary.get('combined_weight', np.nan)), 0)}",
-        f"ETH execution weight: {_fmt_pct(_safe_num(summary.get('eth_execution_weight', summary.get('combined_weight', np.nan))), 0)}",
-        f"Off contribution (scaled): {_fmt_num(off_w_scaled, 4)}",
-        f"Def contribution (scaled): {_fmt_num(def_w_scaled, 4)}",
-        f"Vol regime: {summary.get('vol_regime', 'NA')} ({_fmt_pct(_safe_num(summary.get('vol_percentile', np.nan)), 0)} pctile)",
-        f"Transition: {summary.get('transition_strength', 'NA')} x{_fmt_num(_safe_num(summary.get('transition_multiplier', np.nan)), 2)}",
-        f"ETH conviction: {summary.get('conviction_bucket', 'NA')} ({_fmt_num(_safe_num(summary.get('conviction_score', np.nan)), 2)} score)",
-    ]
-    eth_ema_fast = summary.get("eth_ema_fast", 21)
-    eth_ema_mid = summary.get("eth_ema_mid", 55)
-    eth_ema_slow = summary.get("eth_ema_slow", 144)
-    off_gate_lines = [
-        f"EMA{eth_ema_fast}/{eth_ema_mid}/{eth_ema_slow}: {_fmt_num(_safe_num(summary.get('ema21', np.nan)), 2)} / {_fmt_num(_safe_num(summary.get('ema55', np.nan)), 2)} / {_fmt_num(_safe_num(summary.get('ema144', np.nan)), 2)}",
-        f"Stack aligned ({eth_ema_fast}>{eth_ema_mid}>{eth_ema_slow}): {'YES' if bool(summary.get('stack_aligned', False)) else 'NO'}",
-        f"Days aligned: {summary.get('stack_aligned_days', 'NA')}",
-        f"Days since break: {summary.get('off_days_since_break', 'NA')}",
-        f"Entry threshold met: {'YES' if bool(summary.get('entry_threshold_met', False)) else 'NO'}",
-        f"Raw signal: {_fmt_num(off_w_raw, 4)}",
-        f"Scaled weight: {_fmt_num(off_w_scaled, 4)}",
-    ]
-    def_gate_lines = [
-        f"Mode: {summary.get('defense_live_mode', 'NA')}",
-        f"Signal ts: {summary.get('def_signal_ts', 'NA')}",
-        f"P(up): {_fmt_num(_safe_num(summary.get('def_p_up', np.nan)), 4)}",
-        f"Signal active: {'YES' if bool(summary.get('def_position', False)) else 'NO'}",
-        f"Raw signal: {_fmt_num(def_w_raw, 4)}",
-        f"Scaled weight: {_fmt_num(def_w_scaled, 4)}",
-    ]
-    gold_ema_default = _cfg_int_list(
-        _load_portfolio_config(Path("config/portfolio_config.json")),
-        "gold_ema",
-        [21, 55, 144],
-    )
-    gold_ema_fast = int(summary.get("gold_ema_fast", gold_ema_default[0]))
-    gold_ema_mid = int(summary.get("gold_ema_mid", gold_ema_default[1]))
-    gold_ema_slow = int(summary.get("gold_ema_slow", gold_ema_default[2]))
-    gold_lines = [
-        f"PAXG: ${_fmt_num(_safe_num(summary.get('gold_price', np.nan)), 2)} ({_fmt_pct(_safe_num(summary.get('gold_24h_pct', np.nan)), 2)})",
-        f"EMA{gold_ema_fast}/{gold_ema_mid}/{gold_ema_slow}: {_fmt_num(_safe_num(summary.get('gold_ema21', np.nan)), 2)} / {_fmt_num(_safe_num(summary.get('gold_ema55', np.nan)), 2)} / {_fmt_num(_safe_num(summary.get('gold_ema144', np.nan)), 2)}",
-        f"EMA gate: {'YES' if bool(summary.get('gold_entry_threshold_met', False)) else 'NO'}",
-        f"Flat+BEAR gate: {'YES' if bool(summary.get('gold_flat_bear_gate', False)) else 'NO'}",
-        f"Condition met: {'YES' if bool(summary.get('gold_condition_met', False)) else 'NO'}",
-        f"Paper sleeve: {'ACTIVE' if bool(summary.get('gold_position_active', False)) else 'FLAT'}",
-        f"Paper return: {_fmt_pct(_safe_num(summary.get('gold_paper_return', np.nan)), 2)} | P&L: GBP {_fmt_num(_safe_num(summary.get('gold_paper_pnl_gbp', np.nan)), 2)}",
-    ]
-    mean_rev_lines = [
-        f"Enabled: {'YES' if bool(summary.get('mean_reversion_enabled', False)) else 'NO'}",
-        f"Status: {'ACTIVE' if bool(summary.get('mean_reversion_active', False)) else 'FLAT'}",
-        f"Weight: {_fmt_pct(_safe_num(summary.get('mean_reversion_weight', np.nan)), 0)}",
-        f"Remaining cap: {_fmt_pct(_safe_num(summary.get('mean_reversion_remaining_cap', np.nan)), 0)}",
-        f"Z-score: {_fmt_num(_safe_num(summary.get('mean_reversion_z_score', np.nan)), 2)}",
-        f"Daily ret: {_fmt_pct(_safe_num(summary.get('mean_reversion_daily_ret', np.nan)), 2)}",
-        f"Entry signal: {'YES' if bool(summary.get('mean_reversion_entry_signal', False)) else 'NO'}",
-        f"Exit signal: {'YES' if bool(summary.get('mean_reversion_exit_signal', False)) else 'NO'}",
-        f"Days held: {summary.get('mean_reversion_days_held', 0)}",
-    ]
-    dvol_iv = _safe_num(summary.get("dvol_atm_iv_30d", np.nan))
-    dvol_pct = _safe_num(summary.get("dvol_iv_percentile", np.nan))
-    dvol_slope = _safe_num(summary.get("dvol_term_slope", np.nan))
-    dvol_slope_label = "inverted" if np.isfinite(dvol_slope) and dvol_slope < 0 else ("normal" if np.isfinite(dvol_slope) else "NA")
-    dvol_history_days_raw = _safe_num(summary.get("dvol_history_days", 0))
-    dvol_history_days = int(dvol_history_days_raw) if np.isfinite(dvol_history_days_raw) else 0
-    dvol_insufficient = bool(summary.get("dvol_insufficient_history", True))
-    dvol_mode = "LOG ONLY" if dvol_insufficient or dvol_history_days < 30 else "READY"
-    dvol_options_regime = str(summary.get("dvol_options_vol_regime", "NA")).upper()
-    dvol_rv_regime = str(summary.get("dvol_rv_vol_regime", "NA")).upper()
-    dvol_disagree = (
-        dvol_options_regime not in {"", "NA", "NAN"}
-        and dvol_rv_regime not in {"", "NA", "NAN"}
-        and dvol_options_regime != dvol_rv_regime
-    )
-    options_vol_lines = [
-        f"ATM IV (30d): {_fmt_pct(dvol_iv / 100.0 if dvol_iv > 5 else dvol_iv, 1)}",
-        f"IV pct: {_fmt_pct(dvol_pct, 0)} | Regime: {dvol_options_regime}",
-        f"Term slope: {_fmt_num(dvol_slope, 1)} ({dvol_slope_label})",
-        f"vs Realised: {summary.get('dvol_agreement', 'NA')}",
-        f"Note: {dvol_mode} ({dvol_history_days}/30 days history)",
-    ]
-    if dvol_disagree:
-        options_vol_lines.insert(
-            0,
-            f"IV DISAGREE: Options={dvol_options_regime}, RV={dvol_rv_regime} | Hist avg next 5d: +2.64%",
-        )
-    btc_signal_lines = [
-        f"BTC: ${_fmt_num(_safe_num(summary.get('btc_price', np.nan)), 0)} ({_fmt_pct(_safe_num(summary.get('btc_24h_pct', np.nan)), 1)})",
-        f"EMA15/40/120: {_fmt_num(_safe_num(summary.get('btc_ema15', summary.get('btc_ema21', np.nan))), 2)} / {_fmt_num(_safe_num(summary.get('btc_ema40', summary.get('btc_ema55', np.nan))), 2)} / {_fmt_num(_safe_num(summary.get('btc_ema120', summary.get('btc_ema144', np.nan))), 2)}",
-        f"Stack aligned: {'YES' if bool(summary.get('btc_stack_aligned', False)) else 'NO'}",
-        f"Days aligned: {summary.get('btc_stack_aligned_days', 'NA')}",
-        f"Entry threshold met: {'YES' if bool(summary.get('btc_entry_threshold_met', False)) else 'NO'}",
-        f"Regime: {summary.get('btc_regime', regime_label)}",
-        f"Def signal (funding z): {_fmt_num(_safe_num(summary.get('btc_funding_z', np.nan)), 3)}",
-        f"Raw signal: {_fmt_num(_safe_num(summary.get('btc_off_weight_raw', np.nan)), 4)}",
-        f"Scaled weight: {_fmt_num(_safe_num(summary.get('btc_combined_weight', np.nan)), 4)}",
-        f"Transition: {summary.get('btc_transition_strength', 'NA')} x{_fmt_num(_safe_num(summary.get('btc_transition_multiplier', np.nan)), 2)}",
-        f"Conviction: {summary.get('btc_conviction_bucket', 'NA')} ({_fmt_num(_safe_num(summary.get('btc_conviction_score', np.nan)), 2)} score)",
-    ]
-    perf_lines = [
-        f"Start: {paper_start} | days: {days_live}",
-        f"ETH sleeve strategy: {_fmt_pct(_safe_num(summary.get('eth_sleeve_strategy_ret', summary.get('cum_strategy_ret', np.nan))), 2)}",
-        f"ETH spot: {_fmt_pct(_safe_num(summary.get('eth_sleeve_spot_ret', summary.get('cum_spot_ret', np.nan))), 2)}",
-        f"BTC sleeve strategy: {_fmt_pct(_safe_num(summary.get('btc_sleeve_strategy_ret', np.nan)), 2)}",
-        f"BTC spot: {_fmt_pct(_safe_num(summary.get('btc_sleeve_spot_ret', np.nan)), 2)}",
-        f"Combined strategy: {_fmt_pct(_safe_num(summary.get('portfolio_strategy_ret', summary.get('cum_strategy_ret', np.nan))), 2)}",
-        f"Excess vs 50/50 basket: {_fmt_pct(_safe_num(summary.get('portfolio_excess_vs_basket', summary.get('excess', np.nan))), 2)}",
-        f"Peak DD: {_fmt_pct(_safe_num(summary.get('portfolio_peak_dd', summary.get('peak_dd', np.nan))), 2)}",
-    ]
-    news_lines = [str(summary.get("news_alert_line", "News: No major macro events"))]
-    health_lines = [
-        f"Status: **{status}**",
-        str(summary.get("flags_text", "No flags")),
-    ]
-    live_lines: list[str] = []
+
+    fields = [{"name": "Positions", "value": "\n".join(position_lines), "inline": False}]
+
     if bool(summary.get("live_mode_requested", False)):
-        live_base_currency = str(summary.get("live_base_currency", "EUR") or "EUR")
-        live_currency_symbol = "€" if live_base_currency.upper() == "EUR" else live_base_currency.upper()
-        live_lines = [
-            f"Mode: {'DRY RUN' if bool(summary.get('live_execution_dry_run', True)) else 'REAL'}",
-            f"ETH: {summary.get('live_eth_status', 'NA')}",
-            f"BTC: {summary.get('live_btc_status', 'NA')}",
-            f"Fees: {live_currency_symbol}{_fmt_num(_safe_num(summary.get('live_total_fees_eur', np.nan)), 2)}",
-        ]
-        if str(summary.get("live_execution_error", "")).strip():
-            live_lines.append(f"Error: {summary.get('live_execution_error')}")
-
-    fields = [
-        {"name": "Market", "value": "\n".join(market_lines), "inline": False},
-        {"name": "Markets", "value": "\n".join(markets_lines), "inline": False},
-        {"name": "Strategy State", "value": "\n".join(state_lines), "inline": False},
-        {"name": "Offensive Signal", "value": "\n".join(off_gate_lines), "inline": False},
-        {"name": "Defensive Signal", "value": "\n".join(def_gate_lines), "inline": False},
-        {"name": "BTC Signal", "value": "\n".join(btc_signal_lines), "inline": False},
-        {"name": "Gold Sleeve (Paper)", "value": "\n".join(gold_lines), "inline": False},
-        {"name": "Mean-Reversion Overlay", "value": "\n".join(mean_rev_lines), "inline": False},
-        {"name": f"Options Vol ({dvol_mode})", "value": "\n".join(options_vol_lines), "inline": False},
-        {"name": "Performance (paper)", "value": "\n".join(perf_lines), "inline": False},
-        {"name": "News", "value": "\n".join(news_lines), "inline": False},
-        {"name": "Health", "value": "\n".join(health_lines), "inline": False},
-    ]
-    if live_lines:
-        fields.insert(-2, {"name": "Live Execution", "value": "\n".join(live_lines), "inline": False})
-
-    if bool(summary.get("off_position", False)):
-        fields.insert(
-            2,
-            {
-                "name": "Active Offensive Trade",
-                "value": "\n".join(
-                    [
-                        f"Entry: {summary.get('off_entry_date', 'NA')}",
-                        f"Days held: {summary.get('off_days_held', 'NA')}",
-                        f"Return: {_fmt_pct(_safe_num(summary.get('off_trade_ret', np.nan)), 2)}",
-                    ]
-                ),
-                "inline": False,
-            },
+        live_total = _safe_num(summary.get("live_account_total_eur", np.nan))
+        live_ret = _safe_num(summary.get("live_account_return_pct", np.nan))
+        mode_label = "DRY RUN" if bool(summary.get("live_execution_dry_run", True)) else "REAL"
+        live_line = (
+            f"EUR {_fmt_num(live_total, 2)} ({_fmt_pct(live_ret, 2)} since going live) [{mode_label}]"
+            if np.isfinite(live_total) else f"n/a [{mode_label}]"
         )
-    elif bool(summary.get("off_last_trade_closed", False)):
-        fields.insert(
-            2,
-            {
-                "name": "Last Offensive Trade (CLOSED)",
-                "value": "\n".join(
-                    [
-                        f"Entry: {summary.get('off_last_entry_date', 'NA')} at ${_fmt_num(_safe_num(summary.get('off_last_entry_price', np.nan)), 0)}",
-                        f"Exit: {summary.get('off_last_exit_date', 'NA')} at ${_fmt_num(_safe_num(summary.get('off_last_exit_price', np.nan)), 0)}",
-                        f"Reason: {summary.get('off_last_exit_reason', 'NA')}",
-                        f"Return: {_fmt_pct(_safe_num(summary.get('off_last_return_pct', np.nan)), 2)}",
-                        f"Days held: {summary.get('off_last_days_held', 'NA')}",
-                        "Next Entry: waiting for signal",
-                    ]
-                ),
-                "inline": False,
-            },
-        )
+        live_err = str(summary.get("live_execution_error", "")).strip()
+        if live_err:
+            live_line += f"\nNote: {live_err}"
+        fields.append({"name": "Live Account", "value": live_line, "inline": False})
 
-    if bool(summary.get("gold_position_active", False)):
-        fields.insert(
-            6,
-            {
-                "name": "Active Gold Trade (Paper)",
-                "value": "\n".join(
-                    [
-                        f"Entry: {summary.get('gold_entry_date', 'NA')}",
-                        f"Days held: {summary.get('gold_days_held', 'NA')}",
-                        f"Return: {_fmt_pct(_safe_num(summary.get('gold_return_since_entry', np.nan)), 2)}",
-                    ]
-                ),
-                "inline": False,
-            },
-        )
+    fields.append({
+        "name": "Status",
+        "value": f"**{status}**\n{summary.get('flags_text', 'No flags')}",
+        "inline": False,
+    })
 
-    if bool(summary.get("btc_position", False)):
-        fields.insert(
-            3,
-            {
-                "name": "Active BTC Trade",
-                "value": "\n".join(
-                    [
-                        f"Entry: {summary.get('btc_entry_date', 'NA')}",
-                        f"Days held: {summary.get('btc_days_held', 'NA')}",
-                        f"Return: {_fmt_pct(_safe_num(summary.get('btc_trade_ret', np.nan)), 2)}",
-                    ]
-                ),
-                "inline": False,
-            },
-        )
+    news_line = str(summary.get("news_alert_line", "News: No major macro events"))
+    if len(news_line) > 220:
+        news_line = news_line[:217] + "..."
+    fields.append({"name": "News", "value": news_line, "inline": False})
 
     embed = {
-        "title": f"LPBot Daily Summary - {pd.Timestamp.now('UTC').strftime('%Y-%m-%d')}",
+        "title": f"LPBot Daily - {pd.Timestamp.now('UTC').strftime('%Y-%m-%d')}",
         "color": color,
         "fields": fields,
         "footer": {"text": "LPBot Paper Trading | Hetzner"},
@@ -2143,6 +1972,35 @@ def _run() -> int:
                 live_execution_error = f"{type(exc).__name__}: {exc}"
                 reviews.append(f"live_execution_failed:{str(exc)[:120]}")
 
+    # Live account status for the Discord summary -- independent of whether today's run placed a
+    # trade (runs even on a stop-skipped or hold day), so the "Live Account" field always reflects
+    # real current state. Separate from the live_execution_report above, which only covers today's
+    # attempted order(s).
+    live_account_total_eur = float("nan")
+    live_account_return_pct = float("nan")
+    live_btc_unrealized_pct = float("nan")
+    live_eth_unrealized_pct = float("nan")
+    if bool(args.live):
+        try:
+            _ek_dir = os.path.join(os.getcwd(), "scripts")
+            try:
+                _self_path = Path(__file__).resolve()
+                if _self_path.is_file():
+                    _ek_dir = str(_self_path.parent)
+            except (NameError, OSError):
+                pass
+            if _ek_dir not in sys.path:
+                sys.path.insert(0, _ek_dir)
+            from execution_kraken import compute_live_asset_pnl, get_account_balance, get_current_price, live_return_since_start
+
+            _live_bal = get_account_balance()
+            live_account_total_eur = float(_live_bal.get("total_eur", float("nan")))
+            live_account_return_pct = live_return_since_start(live_account_total_eur)
+            live_btc_unrealized_pct = compute_live_asset_pnl("BTC", float(get_current_price("BTC")))
+            live_eth_unrealized_pct = compute_live_asset_pnl("ETH", float(get_current_price("ETH")))
+        except Exception as exc:
+            reviews.append(f"live_pnl_display_failed:{str(exc)[:120]}")
+
     news_row = _latest_news_row(Path(args.news_log_csv))
     markets_lines = _latest_market_lines(Path(args.market_log_csv))
     news_major_event = False
@@ -2558,6 +2416,10 @@ def _run() -> int:
         "live_total_fees_eur": _safe_num(live_execution_report.get("total_fees_eur", np.nan)) if live_execution_report else np.nan,
         "live_eth_status": str((live_execution_report.get("eth_trade") or {}).get("status", "")) if live_execution_report else "",
         "live_btc_status": str((live_execution_report.get("btc_trade") or {}).get("status", "")) if live_execution_report else "",
+        "live_account_total_eur": live_account_total_eur,
+        "live_account_return_pct": live_account_return_pct,
+        "live_btc_unrealized_pct": live_btc_unrealized_pct,
+        "live_eth_unrealized_pct": live_eth_unrealized_pct,
         "chop_bps_bar_60d": chop_bps_60d,
         "stop_rolling_30d_sharpe": bool(np.isfinite(rolling_30d_sharpe) and rolling_30d_sharpe < float(args.stop_rolling_sharpe)),
         "stop_drawdown": bool(np.isfinite(peak_dd) and peak_dd < float(args.stop_drawdown)),
@@ -2739,6 +2601,10 @@ def _run() -> int:
             "live_total_fees_eur": out_row["live_total_fees_eur"],
             "live_eth_status": out_row["live_eth_status"],
             "live_btc_status": out_row["live_btc_status"],
+            "live_account_total_eur": out_row["live_account_total_eur"],
+            "live_account_return_pct": out_row["live_account_return_pct"],
+            "live_btc_unrealized_pct": out_row["live_btc_unrealized_pct"],
+            "live_eth_unrealized_pct": out_row["live_eth_unrealized_pct"],
             "flags_text": out_row["flags_text"],
             "paper_start_date": out_row["paper_start_date"],
             "days_live": out_row["days_live"],

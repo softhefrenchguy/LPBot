@@ -611,7 +611,103 @@ def execute_strategy_signal(
     }
     if not dry_run:
         _send_discord(_format_trade_report(report))
+        try:
+            _log_daily_pnl(float(post.get("total_eur", 0.0)))
+        except Exception:
+            pass
     return report
+
+
+def _log_daily_pnl(total_eur: float) -> None:
+    """Append/replace today's real account snapshot in DAILY_PNL_LOG. Nothing wrote to this file
+    before -- _latest_daily_loss_eur() (the daily-loss guard) always read an empty/missing file and
+    returned 0.0, making MAX_DAILY_LOSS a permanent no-op. This makes that guard actually work, and
+    doubles as the history a "live P&L" display reads from."""
+    DAILY_PNL_LOG.parent.mkdir(parents=True, exist_ok=True)
+    today = datetime.now(timezone.utc).date().isoformat()
+    rows: list[dict[str, Any]] = []
+    if DAILY_PNL_LOG.exists():
+        try:
+            rows = list(csv.DictReader(DAILY_PNL_LOG.open("r", encoding="utf-8")))
+        except Exception:
+            rows = []
+    prev_total = None
+    for r in reversed(rows):
+        if str(r.get("date", "")) != today:
+            try:
+                prev_total = float(r.get("total_eur", ""))
+            except Exception:
+                prev_total = None
+            break
+    loss_eur = (prev_total - total_eur) if (prev_total is not None and total_eur < prev_total) else 0.0
+    rows = [r for r in rows if str(r.get("date", "")) != today]
+    rows.append({"date": today, "total_eur": f"{total_eur:.8f}", "realised_unrealised_loss_eur": f"{loss_eur:.8f}"})
+    with DAILY_PNL_LOG.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=["date", "total_eur", "realised_unrealised_loss_eur"])
+        w.writeheader()
+        for r in rows:
+            w.writerow({k: r.get(k, "") for k in ["date", "total_eur", "realised_unrealised_loss_eur"]})
+
+
+def live_return_since_start(current_total_eur: float) -> float:
+    """Return of the real account vs. the first-ever logged snapshot (i.e. since going live), as a
+    FRACTION (0.0054 = 0.54%) -- matching the convention every other return field in this codebase
+    uses with _fmt_pct (which multiplies by 100 itself). Caught by a pre-deploy test: returning a
+    percent-point value here (5.4 meaning 5.4%) double-converts through _fmt_pct into "540%"."""
+    if not DAILY_PNL_LOG.exists():
+        return float("nan")
+    try:
+        rows = list(csv.DictReader(DAILY_PNL_LOG.open("r", encoding="utf-8")))
+    except Exception:
+        return float("nan")
+    if not rows:
+        return float("nan")
+    try:
+        start_total = float(rows[0]["total_eur"])
+    except Exception:
+        return float("nan")
+    if start_total <= 0:
+        return float("nan")
+    return current_total_eur / start_total - 1.0
+
+
+def compute_live_asset_pnl(asset: str, current_price: float) -> float:
+    """Reconstruct a weighted-average cost basis for `asset` from real (non-dry-run) filled
+    orders in EXECUTION_LOG, and return the current unrealized P&L as a FRACTION (same convention
+    as live_return_since_start -- see its docstring). NaN if there's no real position (or no fill
+    history) to compute one from."""
+    if not EXECUTION_LOG.exists() or current_price <= 0:
+        return float("nan")
+    try:
+        rows = list(csv.DictReader(EXECUTION_LOG.open("r", encoding="utf-8")))
+    except Exception:
+        return float("nan")
+    qty = 0.0
+    avg_cost = 0.0
+    for r in rows:
+        if str(r.get("asset", "")).upper() != asset.upper():
+            continue
+        if str(r.get("status", "")) != "filled":
+            continue
+        if str(r.get("dry_run", "")).strip().lower() == "true":
+            continue
+        action = str(r.get("action", "")).upper()
+        try:
+            amt = float(r.get("asset_amount", 0.0) or 0.0)
+            price = float(r.get("fill_price", 0.0) or 0.0)
+            fee = float(r.get("fee_eur", 0.0) or 0.0)
+        except Exception:
+            continue
+        if action == "BUY" and amt > 0:
+            new_qty = qty + amt
+            if new_qty > 0:
+                avg_cost = (avg_cost * qty + price * amt + fee) / new_qty
+            qty = new_qty
+        elif action == "SELL" and amt > 0:
+            qty = max(0.0, qty - amt)
+    if qty <= 1e-12 or avg_cost <= 0:
+        return float("nan")
+    return current_price / avg_cost - 1.0
 
 
 def _format_trade_report(report: dict[str, Any]) -> str:
