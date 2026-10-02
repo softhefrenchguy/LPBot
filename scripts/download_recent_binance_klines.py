@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -161,7 +162,18 @@ def main() -> int:
     else:
         merged = merged[["timestamp", "open", "high", "low", "close", "volume", "is_gap"]]
     out.parent.mkdir(parents=True, exist_ok=True)
-    merged.to_csv(out, index=False)
+    # Write atomically: this file is read moments later by a separate process in the same cron
+    # sequence (the defensive-model refresh, then the main checklist), each its own `docker-compose
+    # exec` invocation. A direct to_csv() on a ~38MB file leaves a window where a reader can open a
+    # partially-written file mid-write. Seen in production: the defensive refresh failed with
+    # "No valid timestamps for walk-forward" and, in the same run, the main checklist reported the
+    # price feed as 5371 hours stale (~224 days) immediately after this script logged a successful
+    # fresh write -- both symptoms of reading a half-written file, not an actual feed outage. Writing
+    # to a temp file in the same directory then atomically replacing the target closes that window:
+    # any reader always sees either the complete old file or the complete new one, never a partial.
+    tmp_out = out.with_name(f"{out.name}.tmp{os.getpid()}")
+    merged.to_csv(tmp_out, index=False)
+    os.replace(tmp_out, out)
     if str(args.timestamp_format) == "iso":
         first = pd.to_datetime(merged["timestamp"].iloc[0], utc=True)
         last = pd.to_datetime(merged["timestamp"].iloc[-1], utc=True)
