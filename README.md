@@ -772,6 +772,57 @@ production. Fixed to return fractions, consistent with every other return field 
 across 6 scenarios (normal state, dry-run with a visible error, no live-mode requested, NaN live
 total, long news truncation, NaN per-asset P&L) before deploying.
 
+### 14. Implied-vol exposure dampener, backtested on real multi-year history: rejected
+
+Section 12 found the live IV/RV-disagreement signal didn't hold up on 116 real days. Deribit's
+public API turned out to have much more than that already available: a real historical ETH and BTC
+implied-vol index (DVOL) going back to **2021-03-24** — 2,019 real daily points, not something that
+needs to be accumulated day by day. Pulled the full history and re-ran the regime-accuracy check
+properly: on 1,255 scored days (vs. 65 before), IV-regime direction-calling accuracy is **46.1%** —
+at or below a coin flip, not the encouraging 69.2% the 116-day sample suggested. That was noise.
+
+But a cleaner pattern sits in the same data, pointing the *opposite* direction from the regime
+classifier's built-in assumption: avg next-5-day return by IV level is **HIGH 510d +1.31%, NORMAL
+739d +0.28%, LOW 745d -0.12%** — a classic contrarian/fear-greed pattern (vol spikes precede
+recoveries, complacency precedes weakness), not the "high vol -> expect a drop" logic the existing
+code assumes.
+
+Backtested a defensive-only exposure dampener on that basis: reduce ETH/BTC allocation when each
+asset's own DVOL sits in its bottom quartile (30-day trailing percentile, matching
+`dvol_signal.py`'s live convention exactly), leave it alone otherwise. Explicitly did **not** scale
+exposure *up* on high IV — a standalone test of that half backfired badly and got worse the more
+aggressive it got (CAGR -25.4%, MaxDD -97.1% at 2x/0x), because leverage amplifies volatility drag
+during choppy high-vol stretches even when the *unlevered* average forward return on those days
+looks fine. New flag `--iv-filter` in `backtest_eth_btc_portfolio.py` (off by default, verified
+byte-identical to the production reference when unused), reading real DVOL history from
+`data/eth_dvol_daily.csv` / `data/btc_dvol_daily.csv`, with a hard fallback to multiplier=1.0 for
+any date before 2021-03-24 (no real data exists before then — confirmed the 2019/2020 deltas are
+exactly 0.000, not an approximation).
+
+Tested on the full 2019-2024 production config against the baseline, year by year:
+
+| | 2019 | 2020 | 2021 | 2022 | 2023 | 2024 |
+|---|---|---|---|---|---|---|
+| Baseline Sharpe | 1.282 | 2.358 | 1.830 | -1.199 | -0.015 | 1.739 |
+| With IV filter | 1.282 | 2.358 | 1.923 | -1.031 | -0.190 | 1.597 |
+| Delta | 0.000 | 0.000 | +0.093 | **+0.168** | -0.175 | -0.142 |
+
+Helped in 2021-2022 (the volatile crash years), hurt in 2023-2024 (the calmer years) — the exact
+same regime-dependent pattern a standalone version of this idea showed earlier. **The deciding test
+is the genuinely untouched 2025-2026 window**, never touched by any tuning this session:
+
+| | Sharpe | Total Return | MaxDD |
+|---|---|---|---|
+| Baseline | 0.076 | +0.67% | -17.32% |
+| With IV filter | **-0.235** | **-5.83%** | -15.48% |
+
+Worse on both return and risk-adjusted return in the window that matters most for "would this help
+going forward." **Rejected.** The underlying contrarian-IV pattern may be real (it's a well-known
+phenomenon in other markets), but this specific mechanism only helps during genuine volatility
+spikes and actively hurts in the calmer conditions that have actually been happening recently,
+including right now. Kept in the codebase, off by default, as a documented finding, same convention
+as every other rejected idea in this log.
+
 ## Frozen Research Branches
 
 Historical/frozen components may exist as branches or tags, including:

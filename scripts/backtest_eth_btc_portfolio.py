@@ -262,6 +262,36 @@ def _eth_vol_frame(eth_daily: pd.DataFrame) -> pd.DataFrame:
     return v[["day", "rolling_vol_20d", "vol_percentile", "vol_multiplier"]].copy()
 
 
+def _iv_dampener_frame(dvol_csv: Path, window: int, low_pctile: float, dampener: float) -> pd.DataFrame:
+    """Defensive-only implied-vol dampener: real Deribit DVOL (ETH or BTC implied-vol index,
+    real history only from 2021-03-24 -- days before that get multiplier=1.0, i.e. no effect,
+    same as how a live system would behave before this data existed). Reduces exposure when IV
+    sits in its own bottom quartile (trailing `window`-day percentile) -- "complacency." Explicitly
+    does NOT scale UP on high IV: a standalone backtest of that half showed it backfires badly
+    (leverage compounds volatility drag during choppy high-vol stretches even though the average
+    *unlevered* forward return on those days looks fine) -- see README for the full writeup.
+    Same percentile convention as scripts/options/dvol_signal.py's _iv_percentile (ranks today's
+    reading against the trailing window, not including today, with the +0.5/(n+1) smoothing)."""
+    if not dvol_csv.exists():
+        return pd.DataFrame(columns=["day", "iv_percentile", "iv_multiplier"])
+    d = pd.read_csv(dvol_csv)
+    d["day"] = pd.to_datetime(d["day"], utc=True, errors="coerce").dt.floor("D")
+    d = d.dropna(subset=["day"]).sort_values("day").reset_index(drop=True)
+    dvol = d["dvol"].astype(float)
+    pct = pd.Series(np.nan, index=d.index)
+    for i in range(len(d)):
+        hist = dvol.iloc[max(0, i - window): i]
+        if len(hist) >= 20:
+            pct.iloc[i] = float(((hist <= dvol.iloc[i]).sum() + 0.5) / (len(hist) + 1.0))
+    d["iv_percentile"] = pct
+    d["iv_multiplier"] = np.where(pct < float(low_pctile), float(dampener), 1.0)
+    # Same causal convention as _eth_vol_frame: today's regime is only knowable after today's own
+    # DVOL print, so it can only size tomorrow's position, not today's.
+    d["iv_percentile"] = d["iv_percentile"].shift(1)
+    d["iv_multiplier"] = pd.Series(d["iv_multiplier"], index=d.index).shift(1)
+    return d[["day", "iv_percentile", "iv_multiplier"]].copy()
+
+
 def _intraday_timing_frame(path: Path) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame(columns=["day", "eth_open_5m", "eth_low_4h", "eth_timing_improvement"])
@@ -768,6 +798,12 @@ def main() -> int:
     ap.add_argument("--news-proxy-window-days", type=int, default=3)
     ap.add_argument("--news-proxy-ema-divisor", type=int, default=2, help="How much faster the proxy EMA stack is (spans and confirm-days divided by this, floor-clamped).")
     ap.add_argument("--vol-filter", action="store_true")
+    ap.add_argument("--iv-filter", action="store_true", help="Defensive-only implied-vol dampener: scale down exposure when real Deribit DVOL sits in its own bottom quartile (complacency). Does not scale up on high IV -- see _iv_dampener_frame docstring. No effect before 2021-03-24 (no real DVOL history exists before then).")
+    ap.add_argument("--eth-dvol-csv", default="data/eth_dvol_daily.csv")
+    ap.add_argument("--btc-dvol-csv", default="data/btc_dvol_daily.csv")
+    ap.add_argument("--iv-window", type=int, default=30, help="Trailing days DVOL is percentile-ranked against -- matches the live dvol_signal.py default.")
+    ap.add_argument("--iv-low-percentile", type=float, default=0.25)
+    ap.add_argument("--iv-dampener", type=float, default=0.5, help="Multiplier applied to alloc when IV is in its own low percentile. 1.0 = no effect.")
     ap.add_argument("--transition-momentum", action="store_true")
     ap.add_argument("--cross-confirm", choices=["off", "strict", "loose", "one-way"], default="off")
     ap.add_argument("--dd-aware", choices=["off", "gradual", "binary"], default="off")
@@ -1003,6 +1039,28 @@ def main() -> int:
         merged["asym_btc_multiplier"] = conv_mult(merged["btc_conviction_total"])
         merged["alloc_eth"] = merged["alloc_eth"] * merged["asym_eth_multiplier"]
         merged["alloc_btc"] = merged["alloc_btc"] * merged["asym_btc_multiplier"]
+        gross = merged["alloc_eth"] + merged["alloc_btc"]
+        over = gross > float(args.gross_cap)
+        merged.loc[over, "alloc_eth"] = merged.loc[over, "alloc_eth"] * float(args.gross_cap) / gross.loc[over]
+        merged.loc[over, "alloc_btc"] = merged.loc[over, "alloc_btc"] * float(args.gross_cap) / gross.loc[over]
+
+    merged["eth_iv_multiplier"] = 1.0
+    merged["btc_iv_multiplier"] = 1.0
+    if bool(args.iv_filter):
+        eth_iv = _iv_dampener_frame(Path(args.eth_dvol_csv), int(args.iv_window), float(args.iv_low_percentile), float(args.iv_dampener))
+        btc_iv = _iv_dampener_frame(Path(args.btc_dvol_csv), int(args.iv_window), float(args.iv_low_percentile), float(args.iv_dampener))
+        merged = merged.drop(columns=["eth_iv_multiplier", "eth_iv_percentile"], errors="ignore").merge(
+            eth_iv.rename(columns={"iv_multiplier": "eth_iv_multiplier", "iv_percentile": "eth_iv_percentile"}), on="day", how="left"
+        )
+        merged = merged.drop(columns=["btc_iv_multiplier", "btc_iv_percentile"], errors="ignore").merge(
+            btc_iv.rename(columns={"iv_multiplier": "btc_iv_multiplier", "iv_percentile": "btc_iv_percentile"}), on="day", how="left"
+        )
+        # No real DVOL before 2021-03-24 -- fillna(1.0) so days before that (or any gap) behave
+        # exactly as if this flag were off, not as an unintended full-size dampening.
+        merged["eth_iv_multiplier"] = pd.to_numeric(merged["eth_iv_multiplier"], errors="coerce").fillna(1.0)
+        merged["btc_iv_multiplier"] = pd.to_numeric(merged["btc_iv_multiplier"], errors="coerce").fillna(1.0)
+        merged["alloc_eth"] = merged["alloc_eth"] * merged["eth_iv_multiplier"]
+        merged["alloc_btc"] = merged["alloc_btc"] * merged["btc_iv_multiplier"]
         gross = merged["alloc_eth"] + merged["alloc_btc"]
         over = gross > float(args.gross_cap)
         merged.loc[over, "alloc_eth"] = merged.loc[over, "alloc_eth"] * float(args.gross_cap) / gross.loc[over]
