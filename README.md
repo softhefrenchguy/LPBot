@@ -542,6 +542,16 @@ recognizably the original strategy with noise filtered out) — not currently de
 out-of-sample/robustness scrutiny (different assets, different periods) before being trusted, not
 just a bigger backtest number.
 
+**Update 2026-10-05: the "out-of-sample scrutiny" this section asked for, done — and the
+overfitting flag resolved, not confirmed.** See #17 below for the full decomposition. Short version:
+re-ran this exact sweep with a genuinely out-of-sample window (2025-2026, unavailable when this
+section was written) and the same monotonic pattern held up there too — but a zero-cost version of
+the same sweep showed the entire effect is mechanical cost avoidance (fewer trades = fewer real
+fees), not a genuine noise-filtering benefit. That reframes the choice: there's no hidden "sweet
+spot" to overfit to, just a straightforward cost-vs-responsiveness dial. **Now live at 0.20** (see
+#16), applied to the executed weight itself (not only at order-placement time) so paper tracking and
+live execution always see the same target.
+
 ### 8. Review of the live Discord analyses (Sep 2026): partial-candle follow-up and analysis fixes
 
 Two weeks of real "LPBot Analysis" Discord posts (Sep 7-21) were checked against the code. The bot was
@@ -822,6 +832,112 @@ phenomenon in other markets), but this specific mechanism only helps during genu
 spikes and actively hurts in the calmer conditions that have actually been happening recently,
 including right now. Kept in the codebase, off by default, as a documented finding, same convention
 as every other rejected idea in this log.
+
+### 15. Claude API as a daily decision-maker, tested as an isolated-call shadow system: rejected
+
+Proposed as a possible eventual replacement for the rule-based signal: each day, a fresh Claude API
+call (no shared context between days, no hint of the real current date) given only that day's
+point-in-time snapshot of the same fields the rule-based system uses (EMA/stack state, regime,
+conviction, vol regime, news, funding, DVOL), asked for a target ETH/BTC weight.
+
+A 5-day pilot looked promising — close agreement on direction and rough sizing. The full ~196-day
+history told a different story: only **58%** (ETH) / **65%** (BTC) flat-vs-exposed agreement with
+the real system. The divergence wasn't random — Claude's own reasoning explicitly treated the
+stack-alignment/entry-threshold gate as a dial, not a switch, repeatedly taking small 5-15%
+"speculative stakes" specifically *because* conditions weren't confirmed. Scored against real
+realized next-day returns (same lag/cost convention for both): real system **+1.9%** (Sharpe 0.35)
+vs. Claude **-8.9%** (Sharpe -0.87) over the window.
+
+Added a 10-day trailing history to each call (same prompt, context was the only variable changed) to
+test whether thin per-day context was the cause. On the common 175-day window where both versions
+have valid data, context-Claude edged out the real system on raw return (+0.6% CAGR vs -0.3%) — but
+agreement with the real system's decisions got *worse* (38.5%/48.6%), not better, and exposure
+frequency rose further (84% of days vs 63% without context).
+
+Splitting that window in half settled it: context-Claude was the most extreme performer in *both*
+halves — ~2x worse than the real system in the losing half (-21.7% CAGR, Sharpe -4.80) and ~2.5x
+better in the winning half (+28.8% CAGR, Sharpe 1.60). That's higher beta, not better timing — it
+simply stays exposed more persistently and so amplifies whatever that stretch of history happened to
+do. The full-window "win" was the two halves roughly netting out, not skill. Also surfaced a real
+fragility: longer context prompts caused outright response-truncation failures on ~4% of days.
+
+**Rejected**, both variants. Zero-context loses steadily to noise positions in chop; with-context
+trades that for a leveraged, higher-tail-risk version of market beta. Consistent with everything
+else in this log — the live system's edge has come from discipline (hard gates, position caps,
+stops) surviving honest out-of-sample tests, not from finding a smarter predictor.
+
+### 16. Paper-vs-live divergence diagnosed, led to post-only orders and a real-money-justified resize deadband
+
+A direct question — "why did paper and live P&L move so differently this week?" — traced to two
+different things being shown side by side under similar labels: "paper" BTC return is pure price
+return since the trend signal last flipped on (`b1/b0 - 1`, ignores all in-position weight
+rescaling); "live" is the real weighted-average cost basis reconstructed from actual Kraken fills,
+which *does* shift every time the position is resized. Not a bug in either number individually, but
+genuinely confusing shown together without saying so.
+
+Investigating *why* the live number lagged so far behind surfaced the real finding: BTC's target
+weight had bounced **0.4→0.8→0.4→0.2→0.4→0.8 over 9 days** while `btc_stack_aligned` — the actual
+trend signal — never changed (continuously true for 39 straight days). All of it came from a
+secondary BULL/CHOP regime classifier flickering at its own decision boundary. Real cost: **€4.78 in
+Kraken fees in one week** (~1% of the ~€500 account) from six real rebalancing trades that existed
+purely because of classifier noise, not because the position needed to change. Separately, every one
+of those trades was a market order — i.e. always paying the account's 0.80% taker rate instead of
+the 0.40% maker rate, for no reason tied to urgency (no code path needs an immediate fill; a STOP day
+skips placing any order at all rather than needing to exit fast).
+
+Two changes, both now live (2026-10-05):
+
+- **Post-only limit orders** (`execution_kraken.py`): rest at the current best bid/ask instead of
+  crossing the spread. Falls back to a plain market order if Kraken rejects it for crossing, or it
+  doesn't fill within 45s, so a daily rebalance still completes same-day either way. Shares the same
+  pre-trade safety checks (`LIVE_TRADING_ENABLED`, `MAX_SINGLE_TRADE`, daily-loss guard,
+  confirmation) as the market-order path via one shared `_pre_trade_checks`, rather than duplicating
+  them. Pair price precision read from Kraken's own `AssetPairs` metadata, not hardcoded. Env-gated
+  (`USE_POST_ONLY_ORDERS`, default on) for an instant rollback.
+- **Resize-deadband, re-validated and turned on** (`paper_trade_checklist.py`): see #17 for why 0.20,
+  not 0.40 or the #7-era 0.10. Applied to the computed weight itself, not only at the live-execution
+  call site, so "paper" and "live" always target the same number and both stay a faithful proxy for
+  what the backtest's Sharpe/CAGR actually represent. State persisted across daily cron runs via a
+  small JSON file.
+
+Also checked and set aside: Kraken's volume-based fee discount (real — $10k+/30-day volume drops
+taker to 0.38% — but far more turnover than this account's trade sizes would ever naturally produce;
+not worth chasing deliberately).
+
+### 17. Resize-deadband: the apparent 0.40 improvement is cost avoidance, not signal quality — decomposed, then set to 0.20
+
+#7 flagged a pattern it couldn't fully explain: Sharpe kept climbing monotonically all the way out to
+a 0.40 deadband (1.342 at the time), which reads as a possible overfit rather than "filtering real
+noise," and recommended 0.10 instead. Re-running that exact sweep on the full production config
+(2026-10-05) reproduced almost the same number (1.331 at 0.40) and — now with a genuinely
+out-of-sample window available (2025-Feb 2026, which #7 never had) — found the identical monotonic
+pattern there too (Sharpe -1.857 at 0.00 → -0.971 at 0.40). Surviving honest OOS data is usually
+evidence *against* overfitting, which argued for trusting 0.40 more than #7 could at the time.
+
+To settle it properly, re-ran the identical sweep with trading costs set to **zero**:
+
+| Deadband | Validated Sharpe @60bps | Validated Sharpe @0bps | OOS Sharpe @60bps | OOS Sharpe @0bps |
+|---|---|---|---|---|
+| 0.00 | 1.113 | 1.730 | -1.857 | -0.289 |
+| 0.15 | 1.181 | 1.747 | -1.772 | -0.321 |
+| 0.30 | 1.203 | 1.667 | -1.424 | -0.255 |
+| 0.40 | 1.331 | 1.740 | -0.971 | -0.295 |
+| 0.45 | 1.282 | 1.682 | -0.998 | -0.348 |
+
+At zero cost, the entire pattern disappears — Sharpe bounces in a narrow band with no trend in
+either window, and 0.40 isn't even the best zero-cost value in either one (0.15 edges it out
+validated; 0.35 beats it OOS). **The whole with-cost improvement is the mechanical "fewer trades,
+fewer real fees" effect.** There is no evidence a wider deadband is catching genuinely bad
+re-entries or improving signal quality — it only trades less, which costs less, regardless of
+whether the skipped resizes were noise or genuine risk-management moves.
+
+That reframes the decision from "find the right threshold" (something to overfit) to a plain
+dial: wider deadband trades lower fees for less responsiveness to real in-position resizing (e.g.
+the vol-filter cutting exposure when risk rises). **Set to 0.20** — captures most of the realistic
+fee savings while giving up less responsiveness than 0.40-0.45. Not the #7-era 0.10 (that
+recommendation predates knowing the effect is pure cost-avoidance, so there's no overfitting
+argument left for staying that conservative) and not 0.40 (no longer defensible as "the backtest
+says so" once the mechanism is understood).
 
 ## Frozen Research Branches
 
