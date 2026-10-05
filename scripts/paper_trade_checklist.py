@@ -828,6 +828,7 @@ def _run() -> int:
     p.add_argument("--regime-stuck-days", type=int, default=60)
     p.add_argument("--stop-rolling-sharpe", type=float, default=-0.5)
     p.add_argument("--stop-drawdown", type=float, default=-0.25)
+    p.add_argument("--resize-deadband", type=float, default=0.40, help="Only update the executed ETH/BTC target weight when it moves more than this much (absolute, e.g. 0.4 = 40pp of gross_cap) from the last executed value; a real entry or exit always executes immediately regardless. Backtested on the full validated production config: cuts resize events ~80-87%% and improves Sharpe/MaxDD in both the 2019-2024 validated window and the 2025-2026 OOS window (2026-10-05 finding -- see research log). 0.0 disables the deadband entirely, matching pre-2026-10-05 behavior.")
     p.add_argument("--review-chop-bps", type=float, default=-0.06)
     p.add_argument("--review-dd20", type=float, default=-0.15)
     p.add_argument("--discord-webhook", default=os.environ.get("DISCORD_WEBHOOK_URL", ""))
@@ -1672,6 +1673,45 @@ def _run() -> int:
         eth_execution_weight *= joint_scale
         btc_comb_w *= joint_scale
         flags.append("joint_gross_cap_bind")
+
+    # Resize-deadband (2026-10-05 finding): most daily resizing while a position is already held
+    # came from a secondary BULL/CHOP regime classifier flickering at its own boundary while the
+    # underlying stack-alignment trend signal never changed -- real cost on a small account (one
+    # choppy week burned ~1% of equity in Kraken fees for zero net directional benefit). Applied
+    # here (not only at the live-execution call site) so "paper" and "live" track the SAME target
+    # weight and both match what the validated backtest's Sharpe/CAGR numbers actually represent
+    # -- backtest_eth_btc_portfolio.py's --resize-deadband damps the identical alloc series before
+    # computing returns, so leaving paper undamped would silently stop it being a faithful proxy
+    # for the validated config the moment this went live.
+    deadband = float(getattr(args, "resize_deadband", 0.0) or 0.0)
+    if deadband > 0.0:
+        state_path = Path(args.out_dir) / "resize_deadband_state.json"
+        prev_state: dict[str, object] = {}
+        if state_path.exists():
+            try:
+                prev_state = json.loads(state_path.read_text(encoding="utf-8"))
+            except Exception:
+                prev_state = {}
+
+        def _apply_deadband(key: str, target: float, cur_active: bool) -> float:
+            prev = prev_state.get(key, {}) if isinstance(prev_state.get(key), dict) else {}
+            executed = _safe_num(prev.get("executed_weight", 0.0))
+            if not np.isfinite(executed):
+                executed = 0.0
+            was_active = bool(prev.get("was_active", False))
+            entering_or_exiting = cur_active != was_active
+            if entering_or_exiting or abs(target - executed) > deadband:
+                executed = target
+            prev_state[key] = {"executed_weight": float(executed), "was_active": bool(cur_active)}
+            return float(executed)
+
+        eth_execution_weight = _apply_deadband("eth", eth_execution_weight, bool(off_pos))
+        btc_comb_w = _apply_deadband("btc", btc_comb_w, bool(btc_off_pos))
+        try:
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(json.dumps(prev_state), encoding="utf-8")
+        except Exception:
+            pass
 
     # 4) Live monitoring metrics
     rolling_30d_sharpe = np.nan

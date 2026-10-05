@@ -37,6 +37,16 @@ MIN_CASH_RESERVE_PCT = 0.10
 SLIPPAGE_WARN_PCT = 0.02
 EXECUTION_LOG = Path("artifacts/live_trades/execution_log.csv")
 DAILY_PNL_LOG = Path("artifacts/live_trades/daily_pnl.csv")
+# Kraken's lowest fee tier (this account's current tier, <$2,500 30-day volume) charges 0.80%
+# taker vs 0.40% maker -- exactly double. Every order placed here was always "ordertype": "market",
+# i.e. always taker, for no reason tied to urgency (there is no code path that needs an
+# immediate fill for risk-control reasons -- a STOP day skips placing any order at all, see
+# execution_skipped_stop_active in paper_trade_checklist.py). Default on; env-overridable to
+# fall back to plain market orders without a code change if anything looks wrong in production.
+USE_POST_ONLY_ORDERS = os.getenv("USE_POST_ONLY_ORDERS", "true").strip().lower() == "true"
+POST_ONLY_TIMEOUT_SECONDS = float(os.getenv("POST_ONLY_TIMEOUT_SECONDS", "45"))
+_PAIR_DECIMALS_CACHE: dict[str, int] = {}
+_PAIR_DECIMALS_FALLBACK = {"XBTEUR": 1, "ETHEUR": 2}
 
 
 class KrakenExecutionError(RuntimeError):
@@ -158,6 +168,11 @@ def _resolve_pair(asset: str) -> str:
 
 
 def get_current_price(asset: str) -> float:
+    bid, ask = _get_bid_ask(asset)
+    return (bid + ask) / 2.0
+
+
+def _get_bid_ask(asset: str) -> tuple[float, float]:
     pair = _resolve_pair(asset)
     ticker = _public_query("Ticker", {"pair": pair})
     if not ticker:
@@ -165,7 +180,24 @@ def get_current_price(asset: str) -> float:
     row = next(iter(ticker.values()))
     bid = float(row["b"][0])
     ask = float(row["a"][0])
-    return (bid + ask) / 2.0
+    return bid, ask
+
+
+def _pair_decimals(pair: str) -> int:
+    """Price tick precision for `pair`, from Kraken's own AssetPairs metadata (cached). A
+    post-only limit order needs its price rounded to the pair's real tick size -- the wrong
+    precision gets the order rejected outright. Falls back to a known-correct hardcoded value
+    for our two pairs if the lookup itself fails, rather than guessing for an unknown pair."""
+    if pair in _PAIR_DECIMALS_CACHE:
+        return _PAIR_DECIMALS_CACHE[pair]
+    try:
+        resp = _public_query("AssetPairs", {"pair": pair}, retries=1)
+        row = resp.get(pair) or next(iter(resp.values()))
+        decimals = int(row["pair_decimals"])
+    except Exception:
+        decimals = _PAIR_DECIMALS_FALLBACK.get(pair, 2)
+    _PAIR_DECIMALS_CACHE[pair] = decimals
+    return decimals
 
 
 def get_account_balance() -> dict[str, float]:
@@ -277,6 +309,19 @@ def _require_live_confirmation(asset: str, action: str, asset_amount: float, eur
         raise KrakenExecutionError("Real order aborted by confirmation prompt")
 
 
+def _pre_trade_checks(asset: str, action: str, asset_amount: float, eur_amount: float) -> None:
+    """Shared by every real-order path (market and post-only) so the safety gates can't drift
+    apart between them -- this used to live only inside place_market_order; factored out rather
+    than duplicated when post-only orders were added as a second real-order path."""
+    if os.getenv("LIVE_TRADING_ENABLED", "").strip().lower() != "true":
+        raise KrakenExecutionError("LIVE_TRADING_ENABLED is not true; refusing real order")
+    if eur_amount > MAX_SINGLE_TRADE:
+        raise KrakenExecutionError(f"Order {BASE_SYMBOL}{eur_amount:.2f} exceeds hard max single trade {BASE_SYMBOL}{MAX_SINGLE_TRADE:.2f}")
+    if _latest_daily_loss_eur() > MAX_DAILY_LOSS:
+        raise KrakenExecutionError(f"Daily loss guard exceeded {BASE_SYMBOL}{MAX_DAILY_LOSS:.2f}; refusing trade")
+    _require_live_confirmation(asset, action, asset_amount, eur_amount)
+
+
 def _find_order_by_userref(userref: int) -> str | None:
     """Look up whether an order tagged with this userref already exists (open or
     closed) on Kraken. Used to avoid double-submitting AddOrder when a retry follows
@@ -292,7 +337,15 @@ def _find_order_by_userref(userref: int) -> str | None:
     return None
 
 
-def _place_order_idempotent(pair: str, action: str, volume: str, retries: int = 3) -> dict[str, Any]:
+def _place_order_idempotent(
+    pair: str,
+    action: str,
+    volume: str,
+    retries: int = 3,
+    ordertype: str = "market",
+    price: str | None = None,
+    oflags: str | None = None,
+) -> dict[str, Any]:
     """AddOrder with a userref-based idempotency check. The generic _private_query retry
     loop is safe to reuse for read-only calls (QueryOrders, balances, etc.), but blindly
     retrying AddOrder on a lost/timed-out response risks submitting a SECOND real market
@@ -300,6 +353,11 @@ def _place_order_idempotent(pair: str, action: str, volume: str, retries: int = 
     after the final attempt), check whether an order tagged with this call's userref
     already exists; only submit a fresh AddOrder if it doesn't."""
     userref = int(time.time() * 1000) % 2_000_000_000
+    data: dict[str, Any] = {"pair": pair, "type": action, "ordertype": ordertype, "volume": volume, "userref": userref}
+    if price is not None:
+        data["price"] = price
+    if oflags:
+        data["oflags"] = oflags
     last_error: Exception | None = None
     for attempt in range(1, retries + 1):
         if attempt > 1:
@@ -307,19 +365,58 @@ def _place_order_idempotent(pair: str, action: str, volume: str, retries: int = 
             if existing:
                 return {"txid": [existing]}
         try:
-            return _private_query(
-                "AddOrder",
-                {"pair": pair, "type": action, "ordertype": "market", "volume": volume, "userref": userref},
-                retries=1,
-            )
+            return _private_query("AddOrder", data, retries=1)
         except Exception as exc:
             last_error = exc
+            # A post-only order Kraken would have to fill immediately (price moved into the
+            # spread) is rejected outright, not worth retrying at the same price -- let the
+            # caller fall back to a market order right away instead of burning the retry budget.
+            if "PostOnly" in str(exc) or "would execute immediately" in str(exc).lower():
+                raise
             if attempt < retries:
                 time.sleep(5.0)
     existing = _find_order_by_userref(userref)
     if existing:
         return {"txid": [existing]}
     raise KrakenExecutionError(f"Kraken AddOrder failed: {last_error}")
+
+
+def _cancel_order(order_id: str) -> None:
+    try:
+        _private_query("CancelOrder", {"txid": order_id}, retries=1)
+    except Exception:
+        pass  # best-effort -- if it already filled or already closed, nothing to cancel
+
+
+def _poll_post_only_fill(order_id: str, timeout_seconds: float) -> dict[str, float] | None:
+    """Poll a resting post-only order for up to timeout_seconds. Returns fill info if it closed
+    filled, or None if it's still open/unfilled (or canceled/expired on its own) when the timeout
+    expires -- for a post-only order that is the NORMAL, expected outcome whenever the market
+    doesn't come to the resting price in time, not an alarming state, so unlike
+    confirm_order_filled (written for market orders, where a timeout is genuinely concerning)
+    this does not raise for it. The caller cancels and falls back to a market order on None.
+    Only raises if the order's fate is genuinely impossible to determine -- the query itself
+    failing -- which needs a human, not an automatic retry."""
+    deadline = time.time() + float(timeout_seconds)
+    while time.time() < deadline:
+        try:
+            result = _private_query("QueryOrders", {"txid": order_id})
+        except Exception as exc:
+            msg = f"UNKNOWN_ORDER_STATE: {order_id} -- QueryOrders itself failed: {exc}. Check Kraken manually before any further trading."
+            _send_discord(f"LIVE TRADE UNKNOWN STATE: {msg}")
+            raise KrakenOrderStateUnknown(order_id, msg) from exc
+        row = _extract_order_row(result, order_id)
+        status = str(row.get("status", "unknown")) if isinstance(row, dict) else "not_found"
+        if isinstance(row, dict) and status == "closed":
+            vol = float(row.get("vol_exec", 0.0))
+            cost = float(row.get("cost", 0.0))
+            fee = float(row.get("fee", 0.0))
+            price = cost / vol if vol > 0 else 0.0
+            return {"filled_price": price, "filled_amount": vol, "fee_eur": fee}
+        if isinstance(row, dict) and status in {"canceled", "expired"}:
+            return None  # already gone on its own -- clean to fall back, nothing to cancel
+        time.sleep(1.0)
+    return None  # still open/pending at the deadline -- caller cancels and falls back
 
 
 def place_market_order(
@@ -346,13 +443,7 @@ def place_market_order(
         print(f"DRY RUN: would {action.upper()} {asset_amount:.10f} {asset} at ~{BASE_SYMBOL}{expected_price:.2f}, value {BASE_SYMBOL}{eur_amount:.2f}")
         return result
 
-    if os.getenv("LIVE_TRADING_ENABLED", "").strip().lower() != "true":
-        raise KrakenExecutionError("LIVE_TRADING_ENABLED is not true; refusing real order")
-    if eur_amount > MAX_SINGLE_TRADE:
-        raise KrakenExecutionError(f"Order {BASE_SYMBOL}{eur_amount:.2f} exceeds hard max single trade {BASE_SYMBOL}{MAX_SINGLE_TRADE:.2f}")
-    if _latest_daily_loss_eur() > MAX_DAILY_LOSS:
-        raise KrakenExecutionError(f"Daily loss guard exceeded {BASE_SYMBOL}{MAX_DAILY_LOSS:.2f}; refusing trade")
-    _require_live_confirmation(asset, action, float(asset_amount), eur_amount)
+    _pre_trade_checks(asset, action, float(asset_amount), eur_amount)
 
     pair = _resolve_pair(asset)
     resp = _place_order_idempotent(pair, action, f"{float(asset_amount):.10f}")
@@ -394,6 +485,119 @@ def place_market_order(
             }
         )
     return result
+
+
+def place_post_only_order(
+    asset: str,
+    action: str,
+    asset_amount: float,
+    dry_run: bool = True,
+    log_standalone: bool = True,
+) -> dict[str, Any]:
+    """Maker-only limit order, resting at the current best bid (BUY) / best ask (SELL) --
+    halves the fee vs. a market order at this account's current Kraken tier (0.40% maker vs
+    0.80% taker). Falls back to place_market_order (same guaranteed-fill behavior as before
+    this existed) if the post-only order is rejected for crossing the spread, or if it simply
+    hasn't filled within POST_ONLY_TIMEOUT_SECONDS -- a daily rebalance needs to complete same-day
+    regardless, so this never risks leaving a position un-rebalanced waiting on a better price."""
+    asset = asset.upper()
+    action = action.lower()
+    bid, ask = _get_bid_ask(asset)
+    touch_price = bid if action == "buy" else ask
+    expected_price = (bid + ask) / 2.0
+    eur_amount = float(asset_amount) * expected_price
+
+    if dry_run:
+        result = {
+            "order_id": f"DRYRUN-POSTONLY-{int(time.time())}",
+            "status": "filled",
+            "filled_price": touch_price,
+            "filled_amount": float(asset_amount),
+            "fee_eur": 0.0,
+            "timestamp": _now_iso(),
+            "dry_run": True,
+        }
+        print(f"DRY RUN (post-only): would {action.upper()} {asset_amount:.10f} {asset} at ~{BASE_SYMBOL}{touch_price:.2f} (resting), value {BASE_SYMBOL}{eur_amount:.2f}")
+        return result
+
+    _pre_trade_checks(asset, action, float(asset_amount), eur_amount)
+
+    pair = _resolve_pair(asset)
+    decimals = _pair_decimals(pair)
+    price_str = f"{touch_price:.{decimals}f}"
+    try:
+        resp = _place_order_idempotent(pair, action, f"{float(asset_amount):.10f}", ordertype="limit", price=price_str, oflags="post")
+    except Exception as exc:
+        print(f"Post-only {asset} {action} rejected ({exc}); falling back to market order.")
+        return place_market_order(asset, action, asset_amount, dry_run=False, log_standalone=log_standalone)
+
+    txid = resp.get("txid", [])
+    order_id = txid[0] if isinstance(txid, list) and txid else str(txid)
+    # KrakenOrderStateUnknown (the query itself failing) is NOT caught here -- that's genuinely
+    # ambiguous and must surface, the same way it does for a market order, rather than risk a
+    # second real order on top of a fill whose outcome we can't actually confirm.
+    fill = _poll_post_only_fill(order_id, POST_ONLY_TIMEOUT_SECONDS)
+    if fill is None:
+        _cancel_order(order_id)
+        # Cancel can race a fill that completes in the instant before it lands -- Kraken simply
+        # no-ops the cancel in that case, so check once more rather than assume "canceled" means
+        # "unfilled" and risk placing a second order on top of one that actually went through.
+        fill = _poll_post_only_fill(order_id, timeout_seconds=3.0)
+    if fill is None:
+        print(f"Post-only {asset} {action} did not fill within {POST_ONLY_TIMEOUT_SECONDS:.0f}s; canceled, falling back to market order.")
+        return place_market_order(asset, action, asset_amount, dry_run=False, log_standalone=log_standalone)
+
+    actual_price = float(fill["filled_price"])
+    if expected_price > 0 and abs(actual_price / expected_price - 1.0) > SLIPPAGE_WARN_PCT:
+        _send_discord(f"SLIPPAGE WARNING: {asset} {action} moved from {BASE_SYMBOL}{expected_price:.2f} to {BASE_SYMBOL}{actual_price:.2f}")
+    result = {
+        "order_id": order_id,
+        "status": "filled",
+        "filled_price": actual_price,
+        "filled_amount": float(fill["filled_amount"]),
+        "fee_eur": float(fill.get("fee_eur", 0.0)),
+        "timestamp": _now_iso(),
+        "dry_run": False,
+    }
+    if log_standalone:
+        slippage_bps = ((actual_price / expected_price) - 1.0) * 10000.0 if expected_price > 0 else 0.0
+        _log_execution(
+            {
+                "timestamp": result["timestamp"],
+                "base_currency": BASE_CURRENCY,
+                "asset": asset,
+                "action": action.upper(),
+                "target_weight": "",
+                "actual_weight": "",
+                "eur_amount": float(result["filled_amount"]) * actual_price,
+                "asset_amount": result["filled_amount"],
+                "fill_price": actual_price,
+                "expected_price": expected_price,
+                "slippage_bps": slippage_bps,
+                "fee_eur": result["fee_eur"],
+                "order_id": order_id,
+                "status": "filled",
+                "dry_run": False,
+                "error_message": "",
+            }
+        )
+    return result
+
+
+def place_order(
+    asset: str,
+    action: str,
+    asset_amount: float,
+    dry_run: bool = True,
+    log_standalone: bool = True,
+) -> dict[str, Any]:
+    """Dispatches to the post-only path when enabled, else the plain market-order path. Dry runs
+    always use the plain market-order simulation regardless of USE_POST_ONLY_ORDERS -- there's no
+    real order book or fee-tier difference to simulate, and this keeps existing dry-run behavior
+    (and anything that depends on it) unchanged."""
+    if dry_run or not USE_POST_ONLY_ORDERS:
+        return place_market_order(asset, action, asset_amount, dry_run=dry_run, log_standalone=log_standalone)
+    return place_post_only_order(asset, action, asset_amount, dry_run=False, log_standalone=log_standalone)
 
 
 def _extract_order_row(result: dict[str, Any], order_id: str) -> dict[str, Any] | None:
@@ -496,7 +700,7 @@ def execute_strategy_signal(
     for plan in sells + buys:
         asset = str(plan["asset"])
         try:
-            result = place_market_order(
+            result = place_order(
                 asset,
                 str(plan["action"]).lower(),
                 float(plan["asset_amount"]),
